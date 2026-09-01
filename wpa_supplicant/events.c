@@ -3517,7 +3517,8 @@ static void wpas_parse_connection_info_link(struct wpa_supplicant *wpa_s,
 		return;
 	}
 
-	sta_cw = get_supported_channel_width(&req_persta_elems);
+	sta_cw = get_supported_channel_width(&req_persta_elems,
+					     wpa_s->links[i].freq);
 	ap_cw = get_operation_channel_width(&resp_persta_elems);
 
 	if (wpa_s->connection_vht || wpa_s->connection_he ||
@@ -3603,7 +3604,8 @@ static void wpas_parse_connection_info(struct wpa_supplicant *wpa_s,
 	}
 #endif /* CONFIG_PMKSA_PRIVACY */
 
-	sta_supported_chan_width = get_supported_channel_width(&req_elems);
+	sta_supported_chan_width = get_supported_channel_width(&req_elems,
+							       freq);
 	ap_operation_chan_width = get_operation_channel_width(&resp_elems);
 	if (wpa_s->connection_vht || wpa_s->connection_he ||
 		wpa_s->connection_eht) {
@@ -3640,10 +3642,25 @@ static void wpas_parse_connection_info(struct wpa_supplicant *wpa_s,
 	if (req_mlbuf && resp_mlbuf) {
 		int i;
 
-		for_each_link(wpa_s->valid_links, i)
-			wpas_parse_connection_info_link(wpa_s, i,
-							&req_elems, &resp_elems,
-							req_mlbuf, resp_mlbuf);
+		for_each_link(wpa_s->valid_links, i) {
+			struct wpabuf *req_copy, *resp_copy;
+
+			/*
+			 * ieee802_11_parse_link_profile() may defragment the
+			 * Multi-Link element subelements in-place, modifying
+			 * the buffer contents. Parse a fresh copy for each link
+			 * so that one link's defragmentation does not corrupt
+			 * the buffer used when parsing the remaining links.
+			 */
+			req_copy = wpabuf_dup(req_mlbuf);
+			resp_copy = wpabuf_dup(resp_mlbuf);
+			if (req_copy && resp_copy)
+				wpas_parse_connection_info_link(
+					wpa_s, i, &req_elems, &resp_elems,
+					req_copy, resp_copy);
+			wpabuf_free(req_copy);
+			wpabuf_free(resp_copy);
+		}
 	}
 	wpabuf_free(req_mlbuf);
 	wpabuf_free(resp_mlbuf);
@@ -4742,8 +4759,8 @@ out:
 }
 
 
-static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
-				       union wpa_event_data *data)
+static int wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
+				      union wpa_event_data *data)
 {
 	u8 bssid[ETH_ALEN];
 	int ft_completed, already_authorized;
@@ -4758,13 +4775,13 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_AP
 	if (wpa_s->ap_iface) {
 		if (!data)
-			return;
+			return 0;
 		hostapd_notif_assoc(wpa_s->ap_iface->bss[0],
 				    data->assoc_info.addr,
 				    data->assoc_info.req_ies,
 				    data->assoc_info.req_ies_len, NULL, 0,
 				    NULL, data->assoc_info.reassoc);
-		return;
+		return 0;
 	}
 #endif /* CONFIG_AP */
 
@@ -4783,7 +4800,7 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 				data->assoc_info.resp_ies_len, &parse, use_sha384,
 				reassoc_resp) < 0) {
 				wpa_printf(MSG_DEBUG, "Failed to parse FT IEs");
-				return;
+				return 0;
 			}
 			if (parse.rsn_pmkid != NULL) {
 				wpa_set_ft_completed(wpa_s->wpa);
@@ -4800,14 +4817,14 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 		wpa_dbg(wpa_s, MSG_ERROR, "Failed to get BSSID");
 		wpa_supplicant_deauthenticate(
 			wpa_s, WLAN_REASON_DEAUTH_LEAVING);
-		return;
+		return -1;
 	}
 
 	if (wpa_drv_get_mlo_info(wpa_s) < 0) {
 		wpa_dbg(wpa_s, MSG_ERROR, "Failed to get MLO connection info");
 		wpa_supplicant_deauthenticate(wpa_s,
 					      WLAN_REASON_DEAUTH_LEAVING);
-		return;
+		return -1;
 	}
 
 	if (ft_completed &&
@@ -4817,13 +4834,13 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 		if (!wpa_supplicant_update_current_bss(wpa_s, bssid)) {
 			wpa_printf(MSG_ERROR,
 				   "Can't find target AP's information!");
-			return;
+			return 0;
 		}
 		wpa_supplicant_assoc_update_ie(wpa_s);
 	}
 
 	if (data && wpa_supplicant_event_associnfo(wpa_s, data) < 0)
-		return;
+		return -1;
 	/*
 	 * FILS authentication can share the same mechanism to mark the
 	 * connection fully authenticated, so set ft_completed also based on
@@ -4881,13 +4898,13 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 		if (wpa_supplicant_select_config(wpa_s, data) < 0) {
 			wpa_supplicant_deauthenticate(
 				wpa_s, WLAN_REASON_DEAUTH_LEAVING);
-			return;
+			return -1;
 		}
 	}
 
 	if (!(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) &&
 	    data && wpa_supplicant_use_own_rsne_params(wpa_s, data) < 0)
-		return;
+		return -1;
 
 	multi_ap_set_4addr_mode(wpa_s);
 
@@ -4957,7 +4974,7 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 			"Failed to set MLO connection info to wpa_sm");
 		wpa_supplicant_deauthenticate(wpa_s,
 					      WLAN_REASON_DEAUTH_LEAVING);
-		return;
+		return -1;
 	}
 
 	if (wpa_s->l2)
@@ -5053,7 +5070,7 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 				wpa_s->key_mgmt);
 			wpa_supplicant_deauthenticate(
 				wpa_s, WLAN_REASON_DEAUTH_LEAVING);
-			return;
+			return -1;
 		}
 		os_memcpy(wpa_s->bssid, bssid, ETH_ALEN);
 		wpa_s->assoc_freq = data->assoc_info.freq;
@@ -5123,7 +5140,7 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 			wpa_msg(wpa_s, MSG_INFO, "Failed to init IBSS RSN");
 			wpa_supplicant_deauthenticate(
 				wpa_s, WLAN_REASON_DEAUTH_LEAVING);
-			return;
+			return -1;
 		}
 
 		ibss_rsn_set_psk(wpa_s->ibss_rsn, wpa_s->current_ssid->psk);
@@ -5165,6 +5182,8 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 
 	if (wpa_s->current_ssid && wpa_s->current_ssid->enable_4addr_mode)
 		wpa_supplicant_set_4addr_mode(wpa_s);
+
+	return 0;
 }
 
 
@@ -5980,6 +5999,7 @@ void wpa_supplicant_update_channel_list(struct wpa_supplicant *wpa_s,
 	dl_list_for_each(ifs, &wpa_s->radio->ifaces, struct wpa_supplicant,
 			 radio_list) {
 		bool was_6ghz_enabled;
+		char alpha2[3];
 
 		wpa_printf(MSG_DEBUG, "%s: Updating hw mode",
 			   ifs->ifname);
@@ -5992,7 +6012,27 @@ void wpa_supplicant_update_channel_list(struct wpa_supplicant *wpa_s,
 		}
 		free_hw_features(ifs);
 		ifs->hw.modes = wpa_drv_get_hw_feature_data(
-			ifs, &ifs->hw.num_modes, &ifs->hw.flags, &dfs_domain);
+			ifs, &ifs->hw.num_modes, &ifs->hw.flags, &dfs_domain,
+			alpha2, sizeof(alpha2));
+
+		/* Keep hw_dfs_domain in sync with the latest driver data */
+		ifs->hw_dfs_domain = dfs_domain;
+
+		/*
+		 * If device_country was not set via a REGDOM_TYPE_COUNTRY
+		 * event (e.g., on Android where the country is pre-configured
+		 * before wpa_supplicant starts and no regdom change event is
+		 * sent), populate it from the alpha2 returned by the driver.
+		 */
+		if (!ifs->device_country_set && alpha2[0] && alpha2[1]) {
+			ifs->device_country[0] = alpha2[0];
+			ifs->device_country[1] = alpha2[1];
+			ifs->device_country[2] = '\0';
+			ifs->device_country_set = true;
+			wpa_printf(MSG_DEBUG,
+				   "%s: Device country code set to '%s' from hw feature data",
+				   ifs->ifname, ifs->device_country);
+		}
 
 		was_6ghz_enabled = ifs->is_6ghz_enabled;
 		ifs->is_6ghz_enabled = wpas_is_6ghz_supported(ifs, true);
@@ -6933,7 +6973,11 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			wpa_s->scs_reconfigure = true;
 		}
 #endif /* CONFIG_NO_ROBUST_AV */
-		wpa_supplicant_event_assoc(wpa_s, data);
+		if (wpa_supplicant_event_assoc(wpa_s, data) < 0) {
+			wpa_printf(MSG_DEBUG,
+				   "Skip assoc_auth handling - disconnected during assoc event processing");
+			break;
+		}
 		wpa_s->assoc_status_code = WLAN_STATUS_SUCCESS;
 		if (data &&
 		    (data->assoc_info.authorized ||

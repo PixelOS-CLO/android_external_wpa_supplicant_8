@@ -2138,6 +2138,7 @@ struct phy_info_arg {
 	int last_mode, last_chan_idx;
 	int failed;
 	u8 dfs_domain;
+	char alpha2[3]; /* Country code from NL80211_ATTR_REG_ALPHA2 */
 };
 
 static void phy_info_ht_capa(struct hostapd_hw_modes *mode, struct nlattr *capa,
@@ -3097,6 +3098,11 @@ static int nl80211_get_reg(struct nl_msg *msg, void *arg)
 			   (char *) nla_data(tb_msg[NL80211_ATTR_REG_ALPHA2]));
 	}
 
+	/* Store the alpha2 country code for the caller */
+	os_strlcpy(results->alpha2,
+		   (const char *) nla_data(tb_msg[NL80211_ATTR_REG_ALPHA2]),
+		   sizeof(results->alpha2));
+
 	nla_for_each_nested(nl_rule, tb_msg[NL80211_ATTR_REG_RULES], rem_rule)
 	{
 		u32 start, end, max_eirp = 0, max_bw = 0, flags = 0;
@@ -3240,7 +3246,7 @@ static void nl80211_dump_chan_list(struct wpa_driver_nl80211_data *drv,
 
 struct hostapd_hw_modes *
 nl80211_get_hw_feature_data(void *priv, u16 *num_modes, u16 *flags,
-			    u8 *dfs_domain)
+			    u8 *dfs_domain, char *alpha2, size_t alpha2_len)
 {
 	u32 feat;
 	struct i802_bss *bss = priv;
@@ -3253,11 +3259,14 @@ nl80211_get_hw_feature_data(void *priv, u16 *num_modes, u16 *flags,
 		.last_mode = -1,
 		.failed = 0,
 		.dfs_domain = 0,
+		.alpha2 = "",
 	};
 
 	*num_modes = 0;
 	*flags = 0;
 	*dfs_domain = 0;
+	if (alpha2 && alpha2_len)
+		alpha2[0] = '\0';
 
 	feat = get_nl80211_protocol_features(drv);
 	if (feat & NL80211_PROTOCOL_FEATURE_SPLIT_WIPHY_DUMP)
@@ -3285,6 +3294,8 @@ nl80211_get_hw_feature_data(void *priv, u16 *num_modes, u16 *flags,
 		}
 
 		*dfs_domain = result.dfs_domain;
+		if (alpha2 && alpha2_len)
+			os_strlcpy(alpha2, result.alpha2, alpha2_len);
 
 		modes = wpa_driver_nl80211_postprocess_modes(result.modes,
 							     num_modes);

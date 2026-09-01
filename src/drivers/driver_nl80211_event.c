@@ -2963,7 +2963,8 @@ static unsigned int chan_to_freq(struct wpa_driver_nl80211_data *drv,
 		int i;
 
 		modes = nl80211_get_hw_feature_data(drv->first_bss, &num_modes,
-						    &flags, &dfs_domain);
+						    &flags, &dfs_domain,
+						    NULL, 0);
 		if (!modes) {
 			wpa_printf(MSG_DEBUG,
 				   "nl80211: Fetching hardware mode failed");

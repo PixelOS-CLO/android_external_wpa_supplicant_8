@@ -9880,6 +9880,7 @@ void wpas_p2p_update_channel_list(struct wpa_supplicant *wpa_s,
 	struct p2p_channels chan, cli_chan;
 	struct wpa_used_freq_data *freqs = NULL;
 	unsigned int num = wpa_s->num_multichan_concurrent;
+	struct wpa_supplicant *p2p_wpa_s;
 
 	if (wpa_s->global == NULL || wpa_s->global->p2p == NULL)
 		return;
@@ -9890,9 +9891,12 @@ void wpas_p2p_update_channel_list(struct wpa_supplicant *wpa_s,
 
 	num = get_shared_radio_freqs_data(wpa_s, freqs, num, false);
 
+	p2p_wpa_s = wpa_s->global->p2p_init_wpa_s ?
+		wpa_s->global->p2p_init_wpa_s : wpa_s;
+
 	os_memset(&chan, 0, sizeof(chan));
 	os_memset(&cli_chan, 0, sizeof(cli_chan));
-	if (wpas_p2p_setup_channels(wpa_s, &chan, &cli_chan,
+	if (wpas_p2p_setup_channels(p2p_wpa_s, &chan, &cli_chan,
 				    is_p2p_6ghz_disabled(wpa_s->global->p2p))) {
 		wpa_printf(MSG_ERROR, "P2P: Failed to update supported "
 			   "channel list");

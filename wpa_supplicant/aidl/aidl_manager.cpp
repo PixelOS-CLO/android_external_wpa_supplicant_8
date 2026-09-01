@@ -140,6 +140,14 @@ int registerForDeathAndAddCallbackAidlObjectToList(
 	const std::shared_ptr<CallbackType> &callback,
 	std::vector<std::shared_ptr<CallbackType>> &callback_list)
 {
+	if (!death_notifier || !callback) {
+		wpa_printf(
+			MSG_ERROR,
+			"Unable to store callback, since "
+			"death notifier or callback is null");
+		return 1;
+	}
+
 	binder_status_t status = AIBinder_linkToDeath(callback->asBinder().get(),
 			death_notifier, nullptr /* cookie */);
 	if (status != STATUS_OK) {

@@ -10253,7 +10253,8 @@ static int wpa_driver_nl80211_send_action(struct i802_bss *bss,
 		int i;
 
 		modes = nl80211_get_hw_feature_data(bss, &num_modes,
-						    &flags, &dfs_domain);
+						    &flags, &dfs_domain,
+						    NULL, 0);
 		if (dfs_domain != HOSTAPD_DFS_REGION_ETSI &&
 		    ieee80211_is_dfs(bss->flink->freq, modes, num_modes))
 			offchanok = 0;

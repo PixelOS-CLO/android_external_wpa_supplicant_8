@@ -771,7 +771,7 @@ hostapd_get_hw_feature_data(struct hostapd_data *hapd, u16 *num_modes,
 	    !hapd->drv_priv)
 		return NULL;
 	return hapd->driver->get_hw_feature_data(hapd->drv_priv, num_modes,
-						 flags, dfs_domain);
+						 flags, dfs_domain, NULL, 0);
 }
 
 

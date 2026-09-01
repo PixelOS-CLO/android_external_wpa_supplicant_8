@@ -1567,10 +1567,9 @@ void hostapd_acs_channel_selected(struct hostapd_data *hapd,
 
 			if (mode->mode == acs_res->hw_mode) {
 				if (hapd->iface->freq > 0 &&
-				    !hw_get_chan(mode->mode,
-						 hapd->iface->freq,
-						 hapd->iface->hw_features,
-						 hapd->iface->num_hw_features))
+				    !hw_mode_get_channel(mode,
+							 hapd->iface->freq,
+							 NULL))
 					continue;
 				hapd->iface->current_mode = mode;
 				break;

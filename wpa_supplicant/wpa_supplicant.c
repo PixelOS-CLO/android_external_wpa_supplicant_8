@@ -7975,11 +7975,17 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_FT_PREPEND_PMKID,
 			 wpa_s->conf->ft_prepend_pmkid);
 
-	wpa_s->hw.modes = wpa_drv_get_hw_feature_data(wpa_s,
-						      &wpa_s->hw.num_modes,
-						      &wpa_s->hw.flags,
-						      &dfs_domain);
+	wpa_s->hw.modes = wpa_drv_get_hw_feature_data(
+		wpa_s, &wpa_s->hw.num_modes, &wpa_s->hw.flags, &dfs_domain,
+		wpa_s->device_country, sizeof(wpa_s->device_country));
 	wpa_s->hw_dfs_domain = dfs_domain;
+	if (!wpa_s->device_country_set &&
+	    wpa_s->device_country[0] && wpa_s->device_country[1]) {
+		wpa_s->device_country_set = true;
+		wpa_printf(MSG_DEBUG,
+			   "Device country code set to '%s' from hw feature data at init",
+			   wpa_s->device_country);
+	}
 	if (wpa_s->hw.modes) {
 		u16 i;
 
