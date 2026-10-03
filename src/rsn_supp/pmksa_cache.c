@@ -211,6 +211,30 @@ static void pmksa_cache_set_expiration(struct rsn_pmksa_cache *pmksa)
 
 
 /**
+ * pmksa_cache_derive_pmkid - Derive PMKID for a given PMK, AA, and SPA
+ * @entry: PMKSA cache entry supplying PMK/KCK and AKMP
+ * @aa: Authenticator address
+ * @spa: Supplicant address
+ * @pmkid: Buffer for the derived PMKID (PMKID_LEN bytes)
+ *
+ * Derives the PMKID using the appropriate method for the entry's AKMP.
+ */
+void pmksa_cache_derive_pmkid(const struct rsn_pmksa_cache_entry *entry,
+			      const u8 *aa, const u8 *spa, u8 *pmkid)
+{
+	if (entry->akmp == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192)
+		rsn_pmkid_suite_b_192(entry->kck, entry->kck_len,
+				      aa, spa, pmkid);
+	else if (wpa_key_mgmt_suite_b(entry->akmp))
+		rsn_pmkid_suite_b(entry->kck, entry->kck_len,
+				  aa, spa, pmkid);
+	else
+		rsn_pmkid(entry->pmk, entry->pmk_len, aa, spa, pmkid,
+			  entry->akmp);
+}
+
+
+/**
  * pmksa_cache_add - Add a PMKSA cache entry
  * @pmksa: Pointer to PMKSA cache data from pmksa_cache_init()
  * @pmk: The new pairwise master key
@@ -253,22 +277,18 @@ pmksa_cache_add(struct rsn_pmksa_cache *pmksa, const u8 *pmk, size_t pmk_len,
 		return NULL;
 	os_memcpy(entry->pmk, pmk, pmk_len);
 	entry->pmk_len = pmk_len;
+	entry->akmp = akmp;
 	if (pmkid) {
  		os_memcpy(entry->pmkid, pmkid, PMKID_LEN);
-	} else if (akmp == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
+	} else if (akmp == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192 ||
+		   wpa_key_mgmt_suite_b(akmp)) {
 		if (kck && kck_len > 0) {
-			rsn_pmkid_suite_b_192(kck, kck_len, aa, spa, entry->pmkid);
 			os_memcpy(entry->kck, kck, kck_len);
 			entry->kck_len = kck_len;
-		}
-	} else if (wpa_key_mgmt_suite_b(akmp)) {
-		if (kck && kck_len > 0) {
-			rsn_pmkid_suite_b(kck, kck_len, aa, spa, entry->pmkid);
-			os_memcpy(entry->kck, kck, kck_len);
-			entry->kck_len = kck_len;
+			pmksa_cache_derive_pmkid(entry, aa, spa, entry->pmkid);
 		}
 	} else {
- 		rsn_pmkid(pmk, pmk_len, aa, spa, entry->pmkid, akmp);
+		pmksa_cache_derive_pmkid(entry, aa, spa, entry->pmkid);
 	}
 	os_get_reltime(&now);
 	if (pmksa->sm) {
@@ -279,7 +299,6 @@ pmksa_cache_add(struct rsn_pmksa_cache *pmksa, const u8 *pmk, size_t pmk_len,
 	entry->expiration = now.sec + pmk_lifetime;
 	entry->reauth_time = now.sec +
 		pmk_lifetime * pmk_reauth_threshold / 100;
-	entry->akmp = akmp;
 	entry->auth_alg = auth_alg;
 	if (cache_id) {
 		entry->fils_cache_id_set = 1;
@@ -544,7 +563,7 @@ struct rsn_pmksa_cache_entry * pmksa_cache_get(struct rsn_pmksa_cache *pmksa,
 }
 
 
-static struct rsn_pmksa_cache_entry *
+struct rsn_pmksa_cache_entry *
 pmksa_cache_clone_entry(struct rsn_pmksa_cache *pmksa,
 			const struct rsn_pmksa_cache_entry *old_entry,
 			const u8 *aa)

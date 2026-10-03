@@ -9,10 +9,18 @@
 #ifndef WPA_SUPPLICANT_AIDL_AIDL_H
 #define WPA_SUPPLICANT_AIDL_AIDL_H
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 extern "C"
 {
-#endif  // _cplusplus
+#endif  // __cplusplus
+
+enum wpas_continuous_ranging_status_code {
+	WPAS_CONTINUOUS_RANGING_STATUS_UNKNOWN = 0,
+	WPAS_CONTINUOUS_RANGING_STATUS_PR_RANGE_NEGOTIATION_STARTED = 1,
+	WPAS_CONTINUOUS_RANGING_STATUS_PR_RANGE_NEGOTIATION_SUCCEEDED = 2,
+	WPAS_CONTINUOUS_RANGING_STATUS_PR_STARTED_RANGE_REQUESTS_ISTA_ROLE = 3,
+	WPAS_CONTINUOUS_RANGING_STATUS_PR_STARTED_RANGE_REQUESTS_RSTA_ROLE = 4,
+};
 
 	/**
 	 * This is the aidl RPC interface entry point to the wpa_supplicant
@@ -221,6 +229,12 @@ extern "C"
 		struct wpa_supplicant* wpa_s, u8 ndp_id, const u8* peer_ndi_addr,
 		bool is_success, u8 reason, const u8* app_info, size_t app_info_len);
 	void wpas_aidl_notify_nan_ndp_terminated(struct wpa_supplicant* wpa_s, u8 ndp_id);
+	void wpas_aidl_notify_rtt_continuous_ranging_result(
+		struct wpa_supplicant* wpa_s, const void *data);
+	void wpas_aidl_notify_rtt_continuous_ranging_status(
+		struct wpa_supplicant* wpas_s, enum wpas_continuous_ranging_status_code status);
+	void wpas_aidl_notify_rtt_continuous_ranging_terminated(
+		struct wpa_supplicant* wpa_s, u32 reason);
 	// TODO(b/460750167): Add NAN NDP Schedule Update Event notification
 	// TODO(b/460750167): Add NAN Pairing Event notification
 #else   // CONFIG_CTRL_IFACE_AIDL
@@ -483,10 +497,16 @@ static void wpas_aidl_notify_nan_ndp_confirmed(
 		struct wpa_supplicant* wpa_s, u8 ndp_id, const u8* peer_ndi_addr,
 		bool is_success, u8 reason, const u8* app_info, size_t app_info_len) {}
 static void wpas_aidl_notify_nan_ndp_terminated(struct wpa_supplicant* wpa_s, u8 ndp_id) {}
+static void wpas_aidl_notify_rtt_continuous_ranging_result(
+	struct wpa_supplicant* wpa_s, const void *data) {}
+static void wpas_aidl_notify_rtt_continuous_ranging_status(
+	struct wpa_supplicant* wpa_s, enum wpas_continuous_ranging_status_code status) {}
+static void wpas_aidl_notify_rtt_continuous_ranging_terminated(
+		struct wpa_supplicant* wpa_s, u32 reason) {}
 #endif  // CONFIG_CTRL_IFACE_AIDL
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 }
-#endif  // _cplusplus
+#endif  // __cplusplus
 
 #endif  // WPA_SUPPLICANT_AIDL_AIDL_H

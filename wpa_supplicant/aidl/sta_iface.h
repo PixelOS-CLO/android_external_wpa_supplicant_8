@@ -65,6 +65,7 @@ public:
 	// marked valid before processing them.
 	void invalidate();
 	bool isValid();
+	void setProximityRangingMacAddress(const std::array<uint8_t, 6>& macAddress);
 
 	// Aidl methods exposed.
   	::ndk::ScopedAStatus getName(std::string* _aidl_return) override;
@@ -311,6 +312,7 @@ private:
 	// Name of the iface this aidl object controls
 	const std::string ifname_;
 	bool is_valid_;
+	std::array<uint8_t, 6> proximity_ranging_mac_address_{};
 
 	DISALLOW_COPY_AND_ASSIGN(StaIface);
 };

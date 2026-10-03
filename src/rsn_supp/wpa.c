@@ -5251,6 +5251,7 @@ static const u8 * wpa_sm_get_ap_rsne(struct wpa_sm *sm, size_t *len)
 static const u8 * wpa_sm_get_ap_rsnxe(struct wpa_sm *sm, size_t *len)
 {
 	if (sm->rsn_override != RSN_OVERRIDE_NOT_USED &&
+	    sm->rsn_override != RSN_OVERRIDE_RSNE &&
 	    sm->ap_rsnxe_override && sm->ap_rsnxe_override_len) {
 		*len = sm->ap_rsnxe_override_len;
 		return sm->ap_rsnxe_override;

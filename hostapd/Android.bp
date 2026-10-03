@@ -419,6 +419,7 @@ cc_defaults {
     name: "hostapd_driver_cflags_default",
     cflags: [
         "-DCONFIG_DRIVER_NL80211",
+        "-DCONFIG_NAN",
     ] + select(soong_config_variable("wpa_supplicant_8", "board_wlan_device"), {
         "bcmdhd": ["-DCONFIG_DRIVER_NL80211_BRCM"],
         "synadhd": ["-DCONFIG_DRIVER_NL80211_SYNA"],

@@ -56,6 +56,9 @@ static int sme_validate_basic_mle(const struct ieee802_11_elems *elems,
 static void sme_process_802_1x_auth_response(struct wpa_supplicant *wpa_s,
 					     struct auth_info *auth,
 					     bool external);
+#endif /* CONFIG_IEEE8021X_AUTH */
+
+#if defined(CONFIG_IEEE8021X_AUTH) || defined(CONFIG_ENC_ASSOC)
 
 static const u8 * sme_get_peer_addr(struct wpa_supplicant *wpa_s, bool external)
 {
@@ -66,6 +69,31 @@ static const u8 * sme_get_peer_addr(struct wpa_supplicant *wpa_s, bool external)
 	return wpa_s->valid_links ? wpa_s->ap_mld_addr : wpa_s->pending_bssid;
 }
 
+
+const u8 * sme_get_ext_auth_pmkid(struct wpa_supplicant *wpa_s)
+{
+	struct rsn_pmksa_cache *cache;
+	struct rsn_pmksa_cache_entry *entry;
+	const u8 *peer;
+
+	peer = sme_get_peer_addr(wpa_s, true);
+	if (!peer)
+		return NULL;
+
+	cache = wpa_sm_get_pmksa_cache(wpa_s->wpa);
+	if (!cache)
+		return NULL;
+
+	entry = pmksa_cache_get(cache, peer, wpa_s->own_addr, NULL,
+				wpa_s->sme.ext_auth_wpa_ssid,
+				wpa_s->sme.ext_auth_key_mgmt);
+	return entry ? entry->pmkid : NULL;
+}
+
+#endif /* CONFIG_IEEE8021X_AUTH || CONFIG_ENC_ASSOC */
+
+
+#ifdef CONFIG_IEEE8021X_AUTH
 
 static int sme_get_key_mgmt(struct wpa_supplicant *wpa_s, bool external)
 {
@@ -436,11 +464,12 @@ sme_build_802_1x_for_ptk(struct wpa_supplicant *wpa_s, bool external)
 	if (external)
 		rsne_len = wpa_external_auth_add_rsne(
 			wpa_s->auth_1x->rsne, sizeof(wpa_s->auth_1x->rsne),
-			wpa_s->wpa, wpa_s->sme.ext_auth_key_mgmt,
+			wpa_s->sme.ext_auth_key_mgmt,
 			wpa_s->sme.ext_pairwise_cipher,
 			wpa_s->sme.ext_group_cipher,
 			wpa_s->sme.ext_mgmt_group_cipher,
-			wpa_s->sme.ext_rsn_capab);
+			wpa_s->sme.ext_rsn_capab,
+			sme_get_ext_auth_pmkid(wpa_s));
 	else
 		rsne_len = wpa_gen_wpa_ie_rsn(
 			wpa_s->auth_1x->rsne, sizeof(wpa_s->auth_1x->rsne),
@@ -615,7 +644,7 @@ static void sme_check_802_1x_pmksa_caching(struct wpa_supplicant *wpa_s,
 	peer_addr = sme_get_peer_addr(wpa_s, external);
 	key_mgmt = sme_get_key_mgmt(wpa_s, external);
 
-	rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+	rsnxe = bss ? wpa_bss_get_ie(bss, WLAN_EID_RSNX) : NULL;
 	if (ssid->eap_over_auth_frame &&
 	    ieee802_11_rsnx_capab(rsnxe,
 				  WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION) &&
@@ -922,43 +951,6 @@ static void sme_add_assoc_req_ie(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_ENC_ASSOC
 
-static bool wpas_eppke_ap_capable(struct wpa_supplicant *wpa_s,
-				  struct wpa_bss *bss, bool unauth_eppke)
-{
-	const u8 *ap_rsnxe;
-
-	if (!(wpa_s->drv_flags2 &
-	      WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION)) {
-		wpa_printf(MSG_DEBUG,
-			   "EPPKE: Driver does not support association frame encryption");
-		return false;
-	}
-
-	ap_rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
-
-	if (!ieee802_11_rsnx_capab(ap_rsnxe, WLAN_RSNX_CAPAB_KEK_IN_PASN)) {
-		wpa_printf(MSG_DEBUG, "EPPKE: AP does not support KEK_IN_PASN");
-		return false;
-	}
-
-	if (!ieee802_11_rsnx_capab(ap_rsnxe,
-				   WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
-		wpa_printf(MSG_DEBUG,
-			   "EPPKE: AP does not support association frame encryption");
-		return false;
-	}
-
-	if (unauth_eppke &&
-	    !ieee802_11_rsnx_capab(ap_rsnxe, WLAN_RSNX_CAPAB_UNAUTH_EPPKE)) {
-		wpa_printf(MSG_DEBUG,
-			   "EPPKE: AP does not support unauthenticated EPPKE");
-		return false;
-	}
-
-	return true;
-}
-
-
 static int wpas_eppke_initialize(struct wpa_supplicant *wpa_s,
 				 struct wpa_bss *bss,
 				 struct wpa_ssid *ssid)
@@ -996,13 +988,16 @@ static int wpas_eppke_initialize(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	ap_rsne = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
+	/* EPPKE has not been defined to be modified for RSN overriding, so use
+	 * the RSNE and RSNXE from the AP for PASN MIC calculation instead of
+	 * the RSNO elements, if any. */
+	ap_rsne = wpa_bss_get_ie(bss, WLAN_EID_RSN);
 	if (!ap_rsne) {
 		wpa_printf(MSG_DEBUG, "EPPKE: Can't connect without AP RSNE");
 		return -1;
 	}
 
-	ap_rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
+	ap_rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
 
 	ap_rsne_len = *(ap_rsne + 1) + 2;
 	ap_rsnxe_len = ap_rsnxe ? *(ap_rsnxe + 1) + 2 : 0;
@@ -1022,6 +1017,8 @@ static int wpas_eppke_initialize(struct wpa_supplicant *wpa_s,
 					ap_rsnxe, ap_rsnxe_len);
 	}
 
+	/* Use the RSNXOE, if it was included, for actual AP capability check */
+	ap_rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
 	if (!ieee802_11_rsnx_capab(ap_rsnxe, WLAN_RSNX_CAPAB_KEK_IN_PASN)) {
 		wpa_printf(MSG_DEBUG, "EPPKE: AP does not support KEK_IN_PASN");
 		goto fail;

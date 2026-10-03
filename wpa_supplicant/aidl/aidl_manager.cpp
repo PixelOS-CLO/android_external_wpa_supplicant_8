@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <iostream>
 #include <regex>
@@ -17,11 +18,16 @@
 #include <android/binder_manager.h>
 #include <aidl/android/hardware/wifi/supplicant/IpVersion.h>
 #include <cutils/properties.h>
+#ifdef CONFIG_PR
+#include "src/common/proximity_ranging.h"
+#endif
 
 extern "C" {
 #include "scan.h"
 #include "src/eap_common/eap_sim_common.h"
 #include "list.h"
+#include "src/drivers/driver.h"
+#include "src/drivers/nl80211_copy.h"
 #ifdef CONFIG_NAN
 #include "src/nan/nan_i.h"
 #include "src/nan/nan.h"
@@ -57,6 +63,20 @@ using aidl::android::hardware::wifi::supplicant::KeyMgmtMask;
 using aidl::android::hardware::wifi::supplicant::LegacyMode;
 using aidl::android::hardware::wifi::supplicant::WifiChannelWidthInMhz;
 using aidl::android::hardware::wifi::supplicant::WifiTechnology;
+using aidl::android::hardware::wifi::supplicant::SupplicantWifiRttController;
+using ContinuousRangingStatusCode =
+	aidl::android::hardware::wifi::supplicant::
+		ISupplicantWifiRttControllerEventCallback::
+		ContinuousRangingStatusCode;
+using ContinuousRangingTerminateReasonCode =
+	aidl::android::hardware::wifi::supplicant::
+		ISupplicantWifiRttControllerEventCallback::
+		ContinuousRangingTerminateReasonCode;
+using RttResult =
+	aidl::android::hardware::wifi::supplicant::RttResult;
+using aidl::android::hardware::wifi::supplicant::RttType;
+using aidl::android::hardware::wifi::supplicant::RttBw;
+using aidl::android::hardware::wifi::supplicant::WifiInformationElement;
 
 #ifdef MAINLINE_SUPPLICANT
 #ifdef CONFIG_NAN
@@ -538,6 +558,30 @@ inline std::array<uint8_t, ETH_ALEN> macAddrToArray(const uint8_t* mac_addr) {
 	std::array<uint8_t, ETH_ALEN> arr;
 	std::copy(mac_addr, mac_addr + ETH_ALEN, std::begin(arr));
 	return arr;
+}
+
+RttResult::RttStatus convertRttResultStatusToAidl(u32 status)
+{
+	if (status == NL80211_PMSR_STATUS_SUCCESS)
+		return RttResult::RttStatus::SUCCESS;
+	return RttResult::RttStatus::FAILURE;
+}
+
+RttBw convertNl80211BwToAidl(u32 band_width)
+{
+	switch (band_width) {
+	case NL80211_CHAN_WIDTH_20:
+		return RttBw::BW_20MHZ;
+	case NL80211_CHAN_WIDTH_40:
+		return RttBw::BW_40MHZ;
+	case NL80211_CHAN_WIDTH_80:
+		return RttBw::BW_80MHZ;
+	case NL80211_CHAN_WIDTH_80P80:
+	case NL80211_CHAN_WIDTH_160:
+		return RttBw::BW_160MHZ;
+	default:
+		return RttBw::BW_20MHZ;
+	}
 }
 
 // Raw pointer to the global structure maintained by the core.
@@ -3536,7 +3580,113 @@ P2pUsdBasedServiceDiscoveryResultParams createP2pUsdBasedServiceDiscoveryResult(
 	return p2pServiceDiscoveryInfo;
 }
 
+#ifdef CONFIG_PR
+static struct pr_device * getPeerPrDevice(struct pr_data *pr, const u8 *addr)
+{
+	struct pr_device *dev;
+
+	if (!pr)
+		return NULL;
+
+	dl_list_for_each(dev, &pr->devices, struct pr_device, list) {
+		if (ether_addr_equal(dev->pr_device_addr, addr))
+			return dev;
+	}
+	return NULL;
+}
+
+static void convertEdcaFormatAndBwToAidl(UsdServiceDiscoveryInfo& info,
+		enum edca_format_and_bw_value format_bw) {
+	switch (format_bw) {
+		case EDCA_FORMAT_AND_BW_VHT20:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_20MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::VHT;
+			break;
+		case EDCA_FORMAT_AND_BW_HT40:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_40MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::HT;
+			break;
+		case EDCA_FORMAT_AND_BW_VHT40:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_40MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::VHT;
+			break;
+		case EDCA_FORMAT_AND_BW_VHT80:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_80MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::VHT;
+			break;
+		case EDCA_FORMAT_AND_BW_VHT80P80:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_160MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::VHT;
+			break;
+		case EDCA_FORMAT_AND_BW_VHT160_DUAL_LO:
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased =
+				RttBw::BW_160MHZ;
+			info.prInfo->maxSupportedPreambleEdcaBased =
+				RttPreamble::VHT;
+			break;
+		default:
+			wpa_printf(MSG_ERROR, "PR: EDCA format and bandwidth conversion failed,"
+				" unknown format_bw: %d", static_cast<int>(format_bw));
+			info.prInfo->maxSupportedPacketBandwidthEdcaBased = RttBw::INVALID;
+			info.prInfo->maxSupportedPreambleEdcaBased = RttPreamble::INVALID;
+	}
+}
+
+static void convertNtbFormatAndBwToAidl(UsdServiceDiscoveryInfo &info,
+		enum ntb_format_and_bw_value format_bw)
+{
+	switch (format_bw) {
+		case NTB_FORMAT_AND_BW_HE20:
+			info.prInfo->maxSupportedPacketBandwidthNtb =
+				RttBw::BW_20MHZ;
+			info.prInfo->maxSupportedPreambleNtb =
+				RttPreamble::HE;
+			break;
+		case NTB_FORMAT_AND_BW_HE40:
+			info.prInfo->maxSupportedPacketBandwidthNtb =
+				RttBw::BW_40MHZ;
+			info.prInfo->maxSupportedPreambleNtb =
+				RttPreamble::HE;
+			break;
+		case NTB_FORMAT_AND_BW_HE80:
+			info.prInfo->maxSupportedPacketBandwidthNtb =
+				RttBw::BW_80MHZ;
+			info.prInfo->maxSupportedPreambleNtb =
+				RttPreamble::HE;
+			break;
+		case NTB_FORMAT_AND_BW_HE80P80:
+			info.prInfo->maxSupportedPacketBandwidthNtb =
+				RttBw::BW_160MHZ;
+			info.prInfo->maxSupportedPreambleNtb =
+				RttPreamble::HE;
+			break;
+		case NTB_FORMAT_AND_BW_HE160_DUAL_LO:
+			info.prInfo->maxSupportedPacketBandwidthNtb =
+				RttBw::BW_160MHZ;
+			info.prInfo->maxSupportedPreambleNtb =
+				RttPreamble::HE;
+			break;
+		default:
+			wpa_printf(MSG_ERROR, "PR: NTB format and bandwidth conversion failed,"
+				" unknown format_bw: %d", static_cast<int>(format_bw));
+			info.prInfo->maxSupportedPacketBandwidthNtb = RttBw::INVALID;
+			info.prInfo->maxSupportedPreambleNtb = RttPreamble::INVALID;
+	}
+}
+#endif
+
 UsdServiceDiscoveryInfo createUsdServiceDiscoveryInfo(
+		struct wpa_supplicant *wpa_s,
 		enum nan_service_protocol_type srv_proto_type,
 		int own_id, int peer_id, const u8 *peer_addr,
 		bool fsd, const u8 *ssi, size_t ssi_len) {
@@ -3550,6 +3700,43 @@ UsdServiceDiscoveryInfo createUsdServiceDiscoveryInfo(
 		discoveryInfo.serviceSpecificInfo = byteArrToVec(ssi, ssi_len);
 	}
 	discoveryInfo.isFsd = fsd;
+#ifdef CONFIG_PR
+	if (AidlManager::getInstance()->areAidlServiceAndClientAtLeastVersion(5)) {
+		struct pr_device *dev = getPeerPrDevice(wpa_s->global->pr, peer_addr);
+		if (dev) {
+			discoveryInfo.prInfo.emplace();
+			if (dev->pr_caps.device_name[0] != '\0') {
+				discoveryInfo.prInfo->deviceName =
+					misc_utils::charBufToString(dev->pr_caps.device_name);
+			}
+			// general ranging capabilities
+			discoveryInfo.prInfo->isEdcaBasedRangingSupported = dev->pr_caps.edca_support;
+			discoveryInfo.prInfo->isNtbNonSecureLtfRangingSupported = dev->pr_caps.ntb_support;
+			discoveryInfo.prInfo->isNtbSecureLtfRangingSupported = dev->pr_caps.ntb_support &&
+				dev->pr_caps.secure_he_ltf;
+			discoveryInfo.prInfo->isUnauthenticatedPasnModeSupported = dev->pr_caps.pasn_type
+				& (PR_PASN_DH19_UNAUTH | PR_PASN_DH20_UNAUTH);
+			discoveryInfo.prInfo->isAuthenticatedPasnModeSupported = dev->pr_caps.pasn_type
+				& (PR_PASN_DH19_AUTH | PR_PASN_DH20_AUTH);
+			discoveryInfo.prInfo->is6GHzSupported = dev->pr_caps.support_6ghz;
+			// EDCA capabilities
+			discoveryInfo.prInfo->isEdcaBasedIstaRoleSupported = dev->edca_caps.ista_support;
+			discoveryInfo.prInfo->isEdcaBasedRstaRoleSupported = dev->edca_caps.rsta_support;
+			discoveryInfo.prInfo->maxNumTxAntennas = (
+				dev->edca_caps.edca_hw_caps & EDCA_MAX_TX_ANTENNA_MASK) >> EDCA_MAX_TX_ANTENNA;
+			discoveryInfo.prInfo->maxNumRxAntennas = (
+				dev->edca_caps.edca_hw_caps & EDCA_MAX_RX_ANTENNA_MASK) >> EDCA_MAX_RX_ANTENNA;
+			convertEdcaFormatAndBwToAidl(discoveryInfo,
+					(enum edca_format_and_bw_value)((dev->edca_caps.edca_hw_caps &
+						EDCA_FORMAT_AND_BW_MASK) >> EDCA_FORMAT_AND_BW));
+			discoveryInfo.prInfo->isNtbIstaRoleSupported = dev->ntb_caps.ista_support;
+			discoveryInfo.prInfo->isNtbRstaRoleSupported = dev->ntb_caps.rsta_support;
+			convertNtbFormatAndBwToAidl(discoveryInfo,
+					(enum ntb_format_and_bw_value)((dev->ntb_caps.ntb_hw_caps &
+						NTB_FORMAT_AND_BW_MASK) >> NTB_FORMAT_AND_BW));
+		}
+	}
+#endif
 	return discoveryInfo;
 }
 
@@ -3711,7 +3898,7 @@ void AidlManager::notifyNanServiceDiscovered(
 	} else {
 		// Notify service discovered event on STA interface.
 		UsdServiceDiscoveryInfo discoveryInfo =
-			createUsdServiceDiscoveryInfo(
+			createUsdServiceDiscoveryInfo(wpa_s,
 			srv_proto_type, subscribe_id, peer_publish_id,
 			peer_addr, fsd, ssi, ssi_len);
 		callWithEachStaIfaceCallback(
@@ -3734,7 +3921,7 @@ void AidlManager::notifyNanPublishReplied(
 		return;
 
 	UsdServiceDiscoveryInfo discoveryInfo = createUsdServiceDiscoveryInfo(
-		srv_proto_type, publish_id, peer_subscribe_id, peer_addr,
+		wpa_s, srv_proto_type, publish_id, peer_subscribe_id, peer_addr,
 		false /* fsd */, ssi, ssi_len);
 	callWithEachStaIfaceCallback(
 		misc_utils::charBufToString(wpa_s->ifname),
@@ -3880,6 +4067,155 @@ void AidlManager::notifyNanSubscribeTerminated(
 			&ISupplicantStaIfaceCallback::onUsdSubscribeTerminated,
 			std::placeholders::_1, subscribe_id, aidlReasonCode));
 	}
+}
+
+void AidlManager::notifyRttContinuousRangingResultEvent(struct wpa_supplicant *wpa_s,
+	const void *result)
+{
+	if (!wpa_s || !result)
+		return;
+
+	if (!areAidlServiceAndClientAtLeastVersion(5))
+		return;
+
+	int cmdId = SupplicantWifiRttController::getCurrentCmdId();
+	if (cmdId < 0) {
+		return;
+	}
+
+	RttResult outputResult;
+	const struct wpa_event_data::peer_measurement_result *res =
+		(const struct wpa_event_data::peer_measurement_result *)result;
+	outputResult.addr = macAddrToArray(res->addr);
+	outputResult.burstNum = res->ftm.burst_index;
+	outputResult.measurementNumber = res->ftm.num_ftmr_attempts;
+	outputResult.successNumber = res->ftm.num_ftmr_successes;
+	outputResult.numberPerBurstPeer = static_cast<int8_t>(res->ftm.ftms_per_burst);
+	outputResult.status = convertRttResultStatusToAidl(res->status);
+	outputResult.type = (res->ftm.preamble & BIT(WPA_PR_PREAMBLE_HE)) ?
+		RttType::TWO_SIDED_11AZ_NTB_SECURE : RttType::TWO_SIDED_11MC;
+	outputResult.rssi = -res->ftm.rssi_avg;
+	outputResult.rssiSpread = res->ftm.rssi_spread;
+	outputResult.rttPs = res->ftm.rtt_avg;
+	outputResult.rttSdPs = static_cast<int64_t>(sqrt(res->ftm.rtt_variance));
+	outputResult.rttSpreadPs = res->ftm.rtt_spread;
+	outputResult.distanceMm = static_cast<int32_t>(res->ftm.dist_avg);
+	outputResult.distanceSdMm = static_cast<int32_t>(sqrt(res->ftm.dist_variance));
+	outputResult.distanceSpreadMm = static_cast<int32_t>(res->ftm.dist_spread);
+	outputResult.timestampUs = res->host_time / 1000;
+	outputResult.burstDurationMs = res->ftm.burst_duration;
+	outputResult.negotiatedBurstNum = (res->ftm.num_bursts_exp < 31) ?
+		(1 << res->ftm.num_bursts_exp) : 0;
+
+	// NTB specific fields
+	outputResult.numNtbRepetitionsPerMeasurement = static_cast<int8_t>(res->ftm.ftms_per_burst);
+	outputResult.i2rTxLtfRepetitionCount = static_cast<int8_t>(res->ftm.tx_ltf_repetition_count);
+	outputResult.r2iTxLtfRepetitionCount = static_cast<int8_t>(res->ftm.rx_ltf_repetition_count);
+	outputResult.ntbMinMeasurementTimeIn100Us = res->ftm.min_time_between_measurements;
+	outputResult.ntbMaxMeasurementTimeIn10Ms = res->ftm.max_time_between_measurements;
+	outputResult.numTxSpatialStreams = static_cast<int8_t>(res->ftm.num_tx_spatial_streams);
+	outputResult.numRxSpatialStreams = static_cast<int8_t>(res->ftm.num_rx_spatial_streams);
+	outputResult.nominalTimeMs = res->ftm.nominal_time;
+	outputResult.availabilityWindowTimeMs = res->ftm.availability_window;
+	outputResult.isDelayedLmrEnabled = (res->ftm.is_delayed_lmr != 0);
+
+	// Preamble and Bandwidth
+	outputResult.packetBw = convertNl80211BwToAidl(res->ftm.band_width);
+
+	// LCI/LCR
+	if (res->ftm.lci && res->ftm.lci_len > 0) {
+		outputResult.lci.id = 70;  // Measurement Report
+		outputResult.lci.data.assign(res->ftm.lci, res->ftm.lci + res->ftm.lci_len);
+	}
+	if (res->ftm.civicloc && res->ftm.civicloc_len > 0) {
+		outputResult.lcr.id = 70;  // Measurement Report
+		outputResult.lcr.data.assign(res->ftm.civicloc, res->ftm.civicloc +
+				res->ftm.civicloc_len);
+	}
+
+#ifdef CONFIG_PR
+	// PASN related fields from wpa_s->global->pr->pr_pasn_params if available
+	if (wpa_s->global->pr && wpa_s->global->pr->pr_pasn_params) {
+		struct pr_pasn_ranging_params *params = wpa_s->global->pr->pr_pasn_params;
+		if (os_memcmp(params->peer_addr, res->addr, ETH_ALEN) == 0) {
+			outputResult.isSecureLtfEnabled =
+				(params->ranging_type == PR_NTB_SECURE_LTF_BASED_RANGING);	
+			int64_t baseAkm = static_cast<int64_t>(KeyMgmtMask::PASN);
+			if (params->auth_mode == PR_PASN_AUTH_MODE_SAE ||
+				params->auth_mode == PR_PASN_AUTH_MODE_PMK) {
+				baseAkm = static_cast<int64_t>(KeyMgmtMask::SAE);
+			}
+			outputResult.baseAkm = baseAkm;
+		}
+	}
+#endif
+	std::vector<RttResult> results = {outputResult};
+	callWithEachWifiRttControllerEventCallback(
+		misc_utils::charBufToString(wpa_s->ifname),
+		std::bind(
+		&ISupplicantWifiRttControllerEventCallback::
+			onResults,
+		std::placeholders::_1, cmdId, results));
+}
+
+void AidlManager::notifyRttContinuousRangingStatusChangedEvent(struct wpa_supplicant *wpa_s,
+		enum wpas_continuous_ranging_status_code status)
+{
+	if (!wpa_s)
+		return;
+
+	if (!areAidlServiceAndClientAtLeastVersion(5))
+		return;
+
+	int cmdId = SupplicantWifiRttController::getCurrentCmdId();
+	if (cmdId < 0) {
+		return;
+	}
+
+	callWithEachWifiRttControllerEventCallback(
+		misc_utils::charBufToString(wpa_s->ifname),
+		std::bind(
+		&ISupplicantWifiRttControllerEventCallback::
+			onContinuousRangingStatusChanged,
+		std::placeholders::_1, cmdId,
+		static_cast<ContinuousRangingStatusCode>(status)));
+}
+
+static ContinuousRangingTerminateReasonCode convert_rtt_terminated_reason_to_aidl(
+	u32 status)
+{
+	if (status == NL80211_PMSR_STATUS_SUCCESS) {
+		return ContinuousRangingTerminateReasonCode::RECEIVED_RTT_TERMINATE;
+	} else if (status == NL80211_PMSR_STATUS_TIMEOUT) {
+		return ContinuousRangingTerminateReasonCode::TIMEOUT;
+	} else if (status == NL80211_PMSR_STATUS_FAILURE) {
+		return ContinuousRangingTerminateReasonCode::PR_RANGE_NEG_FAILED;
+	}
+	return ContinuousRangingTerminateReasonCode::UNKNOWN;
+}
+
+void AidlManager::notifyRttContinuousRangingTerminatedEvent(struct wpa_supplicant *wpa_s,
+		u32 reason)
+{
+	if (!wpa_s)
+		return;
+
+	if (!areAidlServiceAndClientAtLeastVersion(5))
+		return;
+
+	int cmdId = SupplicantWifiRttController::getCurrentCmdId();
+	if (cmdId < 0) {
+		return;
+	}
+	SupplicantWifiRttController::setCurrentCmdId(-1);
+
+	callWithEachWifiRttControllerEventCallback(
+		misc_utils::charBufToString(wpa_s->ifname),
+		std::bind(
+		&ISupplicantWifiRttControllerEventCallback::
+			onContinuousRangingTerminated,
+		std::placeholders::_1, cmdId,
+		convert_rtt_terminated_reason_to_aidl(reason)));
 }
 
 #ifdef MAINLINE_SUPPLICANT

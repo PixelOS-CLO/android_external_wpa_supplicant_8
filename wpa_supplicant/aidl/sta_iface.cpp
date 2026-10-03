@@ -405,7 +405,7 @@ bool validateUsdSubscribeConfig(UsdSubscribeConfig subscribeConfig) {
 	return true;
 }
 
-struct nan_publish_params convertAidlNanPublishParamsToInternal(UsdPublishConfig publishConfig) {
+struct nan_publish_params convertAidlNanPublishParamsToInternal(const UsdPublishConfig& publishConfig) {
 	struct nan_publish_params nanPublishParams;
 	nanPublishParams.unsolicited =
 		publishConfig.publishType == UsdPublishConfig::PublishType::UNSOLICITED_ONLY
@@ -426,7 +426,7 @@ struct nan_publish_params convertAidlNanPublishParamsToInternal(UsdPublishConfig
 }
 
 struct nan_subscribe_params convertAidlNanSubscribeParamsToInternal(
-		UsdSubscribeConfig subscribeConfig) {
+		const UsdSubscribeConfig& subscribeConfig) {
 	struct nan_subscribe_params nanSubscribeParams;
 	nanSubscribeParams.active =
 		subscribeConfig.subscribeType == UsdSubscribeConfig::SubscribeType::ACTIVE_MODE;
@@ -456,6 +456,13 @@ void StaIface::invalidate() { is_valid_ = false; }
 bool StaIface::isValid()
 {
 	return (is_valid_ && (retrieveIfacePtr() != nullptr));
+}
+
+void StaIface::setProximityRangingMacAddress(const std::array<uint8_t, 6>& macAddress)
+{
+	proximity_ranging_mac_address_ = macAddress;
+	wpa_printf(MSG_DEBUG, "StaIface %s: Updated proximity ranging MAC address: "
+		   MACSTR, ifname_.c_str(), MAC2STR(proximity_ranging_mac_address_.data()));
 }
 
 ::ndk::ScopedAStatus StaIface::getName(
@@ -2770,6 +2777,28 @@ ndk::ScopedAStatus StaIface::startUsdPublishInternal(
 	struct nan_publish_params nanPublishParams =
 		convertAidlNanPublishParamsToInternal(usdPublishConfig);
 
+	static const std::array<uint8_t, 6> zero_mac = {0, 0, 0, 0, 0, 0};
+	if (usdPublishConfig.usdBaseConfig.isRangingEnabled) {
+		if (proximity_ranging_mac_address_ != zero_mac) {
+			nanPublishParams.forced_addr = proximity_ranging_mac_address_.data();
+			nanPublishParams.proximity_ranging = true;
+			wpa_printf(MSG_DEBUG, "USD publish: using proximity ranging MAC address: "
+				   MACSTR, MAC2STR(proximity_ranging_mac_address_.data()));
+		} else {
+			wpa_printf(MSG_WARNING,
+				"USD publish: ranging is enabled but proximity ranging MAC address is not updated yet.");
+		}
+	}
+
+	std::vector<int32_t> freqListCopy;
+	if (!usdPublishConfig.usdBaseConfig.freqsMhz.empty()) {
+		freqListCopy = usdPublishConfig.usdBaseConfig.freqsMhz;
+		freqListCopy.push_back(0);
+		nanPublishParams.freq_list = freqListCopy.data();
+	} else {
+		nanPublishParams.freq_list = nullptr;
+	}
+
 	int publishId = wpas_nan_publish(
 		wpa_s, usdPublishConfig.usdBaseConfig.serviceName.c_str(),
 		convertAidlServiceProtoTypeToInternal(
@@ -2806,6 +2835,28 @@ ndk::ScopedAStatus StaIface::startUsdSubscribeInternal(
 	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
 	struct nan_subscribe_params nanSubscribeParams =
 		convertAidlNanSubscribeParamsToInternal(usdSubscribeConfig);
+
+	static const std::array<uint8_t, 6> zero_mac = {0, 0, 0, 0, 0, 0};
+	if (usdSubscribeConfig.usdBaseConfig.isRangingEnabled) {
+		if (proximity_ranging_mac_address_ != zero_mac) {
+			nanSubscribeParams.forced_addr = proximity_ranging_mac_address_.data();
+			nanSubscribeParams.proximity_ranging = true;
+			wpa_printf(MSG_DEBUG, "USD subscribe: using proximity ranging MAC address: "
+				   MACSTR, MAC2STR(proximity_ranging_mac_address_.data()));
+		} else {
+			wpa_printf(MSG_WARNING,
+			"USD subscribe: ranging is enabled but proximity ranging MAC address is not updated yet.");
+		}
+	}
+
+	std::vector<int32_t> freqListCopy;
+	if (!usdSubscribeConfig.usdBaseConfig.freqsMhz.empty()) {
+		freqListCopy = usdSubscribeConfig.usdBaseConfig.freqsMhz;
+		freqListCopy.push_back(0);
+		nanSubscribeParams.freq_list = freqListCopy.data();
+	} else {
+		nanSubscribeParams.freq_list = nullptr;
+	}
 
 	int subscribeId = wpas_nan_subscribe(
 		wpa_s, usdSubscribeConfig.usdBaseConfig.serviceName.c_str(),

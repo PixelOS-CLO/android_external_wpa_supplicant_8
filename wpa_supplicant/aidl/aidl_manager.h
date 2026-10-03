@@ -25,6 +25,7 @@
 #include "sta_network.h"
 #include "supplicant.h"
 #include "supplicant_wifi_rtt_controller.h"
+#include "aidl.h"
 
 #ifdef MAINLINE_SUPPLICANT
 #include "mainline_supplicant.h"
@@ -257,6 +258,12 @@ public:
 		size_t num_configs);
 	void notifyNanDataPathTerminatedEvent(struct wpa_supplicant *wpa_s,
 		int ndp_id);
+	void notifyRttContinuousRangingResultEvent(struct wpa_supplicant *wpa_s,
+		const void *data);
+	void notifyRttContinuousRangingStatusChangedEvent(struct wpa_supplicant *wpa_s,
+		enum wpas_continuous_ranging_status_code status);
+	void notifyRttContinuousRangingTerminatedEvent(struct wpa_supplicant *wpa_s,
+		u32 reason);
 #ifdef MAINLINE_SUPPLICANT
 	void notifyNanCapabilitiesResponse(const std::string iface_name,
 		const char16_t id, const NanStatus status, const NanCapabilities capabilities);

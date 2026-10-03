@@ -9,10 +9,10 @@
 #ifndef AIDL_I_H
 #define AIDL_I_H
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 extern "C"
 {
-#endif  // _cplusplus
+#endif  // __cplusplus
 
 	struct wpas_aidl_priv
 	{
@@ -21,8 +21,8 @@ extern "C"
 		void *aidl_manager;
 	};
 
-#ifdef _cplusplus
+#ifdef __cplusplus
 }
-#endif  // _cplusplus
+#endif  // __cplusplus
 
 #endif  // AIDL_I_H

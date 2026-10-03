@@ -35,6 +35,8 @@ class SupplicantWifiRttController : public BnSupplicantWifiRttController {
 public:
 	static std::shared_ptr<SupplicantWifiRttController> create(
 		struct wpa_global* wpa_global, const char* ifname);
+	static int getCurrentCmdId();
+	static void setCurrentCmdId(int cmdId);
 	~SupplicantWifiRttController() override = default;
 	SupplicantWifiRttController(
 		struct wpa_global* wpa_global, const char* ifname);
@@ -83,6 +85,9 @@ private:
 	const std::string ifname_;
 	bool is_valid_;
 	std::weak_ptr<SupplicantWifiRttController> weak_ptr_this_;
+	std::string proximity_ranging_name_;
+	std::array<uint8_t, 6> proximity_ranging_mac_address_{};
+	static int current_cmd_id_;
 };
 
 }  // namespace supplicant

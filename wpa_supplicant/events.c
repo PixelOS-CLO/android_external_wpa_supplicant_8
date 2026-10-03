@@ -463,7 +463,113 @@ void wpa_supplicant_mark_disassoc(struct wpa_supplicant *wpa_s)
 }
 
 
-static void wpa_find_assoc_pmkid(struct wpa_supplicant *wpa_s)
+static int wpa_find_assoc_pmkid_okc(struct wpa_supplicant *wpa_s,
+				     struct wpa_ie_data *ie,
+				     struct rsn_pmksa_cache_entry *cur_pmksa,
+				     int authorized)
+{
+	struct rsn_pmksa_cache_entry *okc_entry;
+	u8 derived_pmkid[PMKID_LEN];
+	const u8 *aa;
+	u8 bssid[ETH_ALEN];
+	size_t i;
+
+	if (!wpa_s->current_ssid ||
+	    !(wpa_s->current_ssid->proactive_key_caching < 0 ?
+	      wpa_s->conf->okc : wpa_s->current_ssid->proactive_key_caching) ||
+	    !(wpa_s->current_ssid->proto & WPA_PROTO_RSN)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"OKC: Proactive key caching not enabled");
+		return -1;
+	}
+
+	if (!cur_pmksa) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "OKC: Current PMKSA not set");
+		return -1;
+	}
+
+	/*
+	 * SAE and FILS reuse the original PMKID when cloning, so the direct
+	 * PMKID lookup in wpa_find_assoc_pmkid() would have already matched.
+	 * No point trying OKC for these AKMs.
+	 */
+	if (wpa_key_mgmt_sae(cur_pmksa->akmp) ||
+	    wpa_key_mgmt_fils(cur_pmksa->akmp)) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "OKC: Current PMKSA AKM is SAE/FILS");
+		return -1;
+	}
+
+	/*
+	 * wpa_s->bssid is not updated to the newly associated bssid yet,
+	 * fetch it from the driver.
+	 */
+	if (wpa_drv_get_bssid(wpa_s, bssid) < 0 || is_zero_ether_addr(bssid)) {
+		wpa_dbg(wpa_s, MSG_ERROR, "OKC: Fetching BSSID failed");
+		return -1;
+	}
+
+	aa = wpa_s->valid_links ? wpa_s->ap_mld_addr : bssid;
+
+	/*
+	 * Skip OKC fallback if a PMKSA cache entry already exists for the
+	 * target AP, the direct PMKID search loop already compared all PMKIDs
+	 * in the (Re)Association Request frame RSNE against it and found no
+	 * match.
+	 */
+	if (pmksa_cache_get(wpa_sm_get_pmksa_cache(wpa_s->wpa), aa,
+			    wpa_s->own_addr, NULL,
+			    wpa_s->current_ssid, 0)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"OKC: Newly associated BSSID already has PMKSA entry");
+		return -1;
+	}
+
+	wpa_dbg(wpa_s, MSG_DEBUG,
+		"RSN: No direct PMKID match found - trying OKC for "
+		MACSTR " to identify driver-derived PMKID", MAC2STR(aa));
+
+	pmksa_cache_derive_pmkid(cur_pmksa, aa, wpa_s->own_addr, derived_pmkid);
+
+	for (i = 0; i < ie->num_pmkid; i++) {
+		if (os_memcmp(derived_pmkid, ie->pmkid + i * PMKID_LEN,
+			      PMKID_LEN) != 0)
+			continue;
+
+		/* PMKID matched - now create the OKC cache entry and set it as
+		 * current. */
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"RSN: PMKSA cache entry found via OKC for " MACSTR,
+			MAC2STR(aa));
+		okc_entry = pmksa_cache_clone_entry(
+			wpa_sm_get_pmksa_cache(wpa_s->wpa), cur_pmksa, aa);
+		if (!okc_entry)
+			return -1;
+		/*
+		 * When the association is already authorized (4-Way Handshake
+		 * was handled by the driver/firmware), the OKC PMKSA entry
+		 * should not be marked as opportunistic since there is no
+		 * pending handshake that would later confirm and clear the
+		 * flag.
+		 */
+		if (authorized) {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"RSN: Port already authorized - marking OKC PMKSA entry as non-opportunistic (4-Way Handshake completed by the driver/firmware)");
+			okc_entry->opportunistic = 0;
+		}
+		pmksa_cache_set_current(wpa_s->wpa, okc_entry->pmkid, NULL,
+					NULL, 0, NULL, 0, true);
+		eapol_sm_notify_pmkid_attempt(wpa_s->eapol);
+		wpa_sm_set_pmk_from_pmksa(wpa_s->wpa);
+		return 0;
+	}
+
+	wpa_dbg(wpa_s, MSG_DEBUG,
+		"RSN: OKC derived PMKID does not match any PMKID in (Re)Associaton Request frame RSNE");
+	return -1;
+}
+
+
+static void wpa_find_assoc_pmkid(struct wpa_supplicant *wpa_s, bool authorized)
 {
 	struct wpa_ie_data ie;
 	int pmksa_set = -1;
@@ -492,6 +598,11 @@ static void wpa_find_assoc_pmkid(struct wpa_supplicant *wpa_s)
 			break;
 		}
 	}
+
+	if (pmksa_set != 0 &&
+	    (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_OKC_PMKID_IN_ASSOC))
+		pmksa_set = wpa_find_assoc_pmkid_okc(wpa_s, &ie, cur_pmksa,
+						     authorized);
 
 	wpa_dbg(wpa_s, MSG_DEBUG, "RSN: PMKID from assoc IE %sfound from "
 		"PMKSA cache", pmksa_set == 0 ? "" : "not ");
@@ -3858,7 +3969,8 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 			if (wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, p, len))
 				break;
 			found = 1;
-			wpa_find_assoc_pmkid(wpa_s);
+			wpa_find_assoc_pmkid(wpa_s,
+					     data->assoc_info.authorized);
 		}
 #ifndef CONFIG_NO_WPA
 		if (!found_x && p[0] == WLAN_EID_RSNX) {

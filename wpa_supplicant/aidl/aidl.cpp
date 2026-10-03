@@ -20,6 +20,8 @@ extern "C"
 #include "utils/eloop.h"
 #include "utils/includes.h"
 #include "dpp.h"
+#include "src/drivers/driver.h"
+#include "src/drivers/nl80211_copy.h"
 }
 
 using aidl::android::hardware::wifi::supplicant::AidlManager;
@@ -27,6 +29,14 @@ using aidl::android::hardware::wifi::supplicant::AuxiliarySupplicantEventCode;
 using aidl::android::hardware::wifi::supplicant::DppEventType;
 using aidl::android::hardware::wifi::supplicant::DppFailureCode;
 using aidl::android::hardware::wifi::supplicant::DppProgressCode;
+using ContinuousRangingTerminateReasonCode =
+	aidl::android::hardware::wifi::supplicant::
+	ISupplicantWifiRttControllerEventCallback::
+	ContinuousRangingTerminateReasonCode;
+using ContinuousRangingStatusCode =
+	aidl::android::hardware::wifi::supplicant::
+		ISupplicantWifiRttControllerEventCallback::
+		ContinuousRangingStatusCode;
 
 static void wpas_aidl_notify_dpp_failure(struct wpa_supplicant *wpa_s, DppFailureCode code);
 static void wpas_aidl_notify_dpp_progress(struct wpa_supplicant *wpa_s, DppProgressCode code);
@@ -1407,6 +1417,45 @@ void wpas_aidl_notify_nan_ndp_terminated(struct wpa_supplicant* wpa_s, u8 ndp_id
 
 	wpa_printf(MSG_DEBUG, "Notifying NAN NDP terminated");
 	aidl_manager->notifyNanDataPathTerminatedEvent(wpa_s, ndp_id);
+}
+
+void wpas_aidl_notify_rtt_continuous_ranging_result(
+	struct wpa_supplicant *wpa_s, const void *data)
+{
+	if (!wpa_s || !data)
+		return;
+
+	AidlManager *aidl_manager = AidlManager::getInstance();
+	if (!aidl_manager)
+		return;
+
+	aidl_manager->notifyRttContinuousRangingResultEvent(wpa_s, data);
+}
+
+void wpas_aidl_notify_rtt_continuous_ranging_status(
+	struct wpa_supplicant* wpa_s, enum wpas_continuous_ranging_status_code status)
+{
+	if (!wpa_s)
+		return;
+
+	AidlManager *aidl_manager = AidlManager::getInstance();
+	if (!aidl_manager)
+		return;
+
+	wpa_printf(MSG_DEBUG, "Notifying RTT continuous ranging status %d", status);
+	aidl_manager->notifyRttContinuousRangingStatusChangedEvent(wpa_s, status);
+}
+
+void wpas_aidl_notify_rtt_continuous_ranging_terminated(
+		struct wpa_supplicant* wpa_s, u32 reason)
+{
+	if (!wpa_s) return;
+
+	AidlManager *aidl_manager = AidlManager::getInstance();
+	if (!aidl_manager) return;
+
+	wpa_printf(MSG_DEBUG, "Notifying RTT continuous ranging terminated, reason=%d", reason);
+	aidl_manager->notifyRttContinuousRangingTerminatedEvent(wpa_s, reason);
 }
 
 static enum p2p_prov_disc_status convert_p2p_status_code_to_p2p_prov_disc_status(int status) {
