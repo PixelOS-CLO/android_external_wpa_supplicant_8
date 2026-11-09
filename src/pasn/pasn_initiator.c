@@ -304,7 +304,7 @@ static struct wpabuf * wpas_pasn_fils_build_auth(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, WLAN_STATUS_SUCCESS);
 
 	/* Own RSNE */
-	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher);
+	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher, 0);
 
 	/* FILS Nonce */
 	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
@@ -697,7 +697,8 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 
 	if (pasn->rsn_ie && pasn->rsn_ie_len)
 		wpabuf_put_data(buf, pasn->rsn_ie, pasn->rsn_ie_len);
-	else if (wpa_pasn_add_rsne(buf, pmkid, pasn->akmp, pasn->cipher) < 0)
+	else if (wpa_pasn_add_rsne(buf, pmkid, pasn->akmp, pasn->cipher,
+				   pasn_get_test_random_pmkid(pasn)) < 0)
 		goto fail;
 
 	if (!wrapped_data_buf)
@@ -715,6 +716,9 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 				  pubkey, true, comeback, -1);
 
 	wpa_pasn_add_extra_ies(buf, pasn->extra_ies, pasn->extra_ies_len);
+
+	if (pasn->security_profile)
+		wpabuf_put_buf(buf, pasn->security_profile);
 
 	wpas_pasn_add_mle(pasn, buf);
 
@@ -942,6 +946,9 @@ void wpa_pasn_reset(struct pasn_data *pasn)
 		os_free((u8 *) pasn->extra_ies);
 		pasn->extra_ies = NULL;
 	}
+
+	wpabuf_free(pasn->security_profile);
+	pasn->security_profile = NULL;
 
 	wpabuf_free(pasn->frame);
 	pasn->frame = NULL;

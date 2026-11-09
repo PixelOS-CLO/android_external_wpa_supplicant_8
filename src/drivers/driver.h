@@ -1476,6 +1476,17 @@ struct wpa_driver_associate_params {
 	 * Request frame.
 	 */
 	bool okc_pmkid_in_assoc;
+
+	/**
+	 * security_profile_active - Whether Security Profile element is active
+	 *
+	 * This indicates when the Security Profile element (defined in IEEE
+	 * 802.11bn) functionality is enabled locally. Drivers that handle the
+	 * Security Profile element themselves (e.g., for driver-SME) can use
+	 * this flag to know whether to parse, validate, and apply the element
+	 * in case the target AP supports security profiles.
+	 */
+	bool security_profile_active;
 };
 
 enum hide_ssid {
@@ -2619,6 +2630,9 @@ struct wpa_driver_capa {
 	u64 flags2;
 /** Driver supports of adaptive 11r feature */
 #define WPA_DRIVER_FLAGS_ADAPTIVE_11R	        0x8000000000000000ULL
+/** Driver supports Security Profile element (IEEE P802.11bn/D2.0, 9.4.2.369
+ * and 37.33) handling */
+#define WPA_DRIVER_FLAGS2_SECURITY_PROFILE      0x0000008000000000ULL
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
 	(drv_flags & WPA_DRIVER_FLAGS_FULL_AP_CLIENT_STATE)
@@ -6732,6 +6746,46 @@ enum wpa_event_type {
 	 * measurement session identified by the cookie has ended.
 	 */
 	EVENT_PEER_MEASUREMENT_COMPLETE,
+
+	/**
+	 * EVENT_ROAM_STATUS - Roam authentication status from the firmware
+	 *
+	 * Used by drivers that offload (re)association for a roam to the AP
+	 * with which the station is already associated (e.g., an FT initial
+	 * mobility domain association), but leave the EAPOL 4-way handshake
+	 * for wpa_supplicant to handle. Since the Key Replay Counter state
+	 * may have been reset by an earlier FT protocol roam, an EAPOL-Key
+	 * message 1 for the new association arriving before the roam
+	 * indication cannot otherwise be reliably distinguished from a PTK
+	 * rekeying message on the existing association.
+	 *
+	 * This event indicates that IEEE 802.11 authentication with the target
+	 * AP has completed (action ROAM_AUTH_STATUS_ACTION_AUTH_DONE), so that
+	 * EAPOL frame processing can be deferred until the roam indication
+	 * arrives, or that a roam attempt has been aborted after a previous
+	 * AUTH_DONE (action ROAM_AUTH_STATUS_ACTION_ROAM_ABORT). The event
+	 * data is struct roam_auth_status. Acknowledging AUTH_DONE to the
+	 * driver/firmware is handled internally within the driver wrapper and
+	 * is not exposed through this event interface.
+	 */
+	EVENT_ROAM_STATUS,
+};
+
+
+/**
+ * enum roam_auth_status_action - Action values for EVENT_ROAM_STATUS
+ *
+ * @ROAM_AUTH_STATUS_ACTION_AUTH_DONE: IEEE 802.11 authentication with the
+ *	target AP has completed for a roam for which wpa_supplicant handles the
+ *	EAPOL exchange. EAPOL frames for the new association need to be
+ *	deferred until the matching roam indication is processed.
+ * @ROAM_AUTH_STATUS_ACTION_ROAM_ABORT: The roam attempt for which
+ *	AUTH_DONE was most recently indicated has been aborted; any deferred
+ *	EAPOL frame needs to be discarded.
+ */
+enum roam_auth_status_action {
+	ROAM_AUTH_STATUS_ACTION_AUTH_DONE = 0,
+	ROAM_AUTH_STATUS_ACTION_ROAM_ABORT = 1,
 };
 
 
@@ -7855,6 +7909,18 @@ union wpa_event_data {
 	struct peer_measurement_complete {
 		u64 cookie;
 	} peer_measurement_complete;
+
+	/**
+	 * struct roam_auth_status - Data for EVENT_ROAM_STATUS
+	 * @action: Action value from enum roam_auth_status_action
+	 * @bssid: BSSID of the target AP
+	 * @ap_mld_addr: AP MLD address (all zeros if not an ML connection)
+	 */
+	struct roam_auth_status {
+		enum roam_auth_status_action action;
+		u8 bssid[ETH_ALEN];
+		u8 ap_mld_addr[ETH_ALEN];
+	} roam_auth_status;
 };
 
 /**

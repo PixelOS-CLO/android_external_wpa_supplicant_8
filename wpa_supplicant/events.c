@@ -12,6 +12,7 @@
 #include "utils/crc32.h"
 #include "eapol_supp/eapol_supp_sm.h"
 #include "rsn_supp/wpa.h"
+#include "rsn_supp/wpa_ie.h"
 #include "eloop.h"
 #include "config.h"
 #include "l2_packet/l2_packet.h"
@@ -784,6 +785,7 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 	struct wpa_ie_data ie;
 	int proto_match = 0;
 	const u8 *rsn_ie, *wpa_ie;
+	const u8 *sp = NULL; /* AP's Security Profile element */
 	int ret;
 #ifdef CONFIG_WEP
 	int wep_ok;
@@ -808,6 +810,23 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 			wpa_dbg(wpa_s, MSG_DEBUG,
 				"   skip - 6 GHz BSS without RSNE");
 		return 0;
+	}
+
+	/*
+	 * Security Profile element preference (IEEE P802.11bn/D2.0, 37.33):
+	 * Fetch the AP's Security Profile element early so we can use it
+	 * to override the RSNE checks below when the AP advertises a security
+	 * profile that matches the STA's configured AKM/cipher.
+	 */
+	if (wpas_security_profile_active(wpa_s))
+		sp = wpa_bss_get_ie_ext(bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+	if (sp && ssid->security_profiles &&
+	    security_profile_select_best(sp, ssid->security_profiles)) {
+		if (debug_print)
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"   selected based on Security Profile element");
+		return 1;
 	}
 
 	while ((ssid->proto & WPA_PROTO_RSN) && rsn_ie) {
@@ -850,6 +869,44 @@ static int wpa_supplicant_ssid_bss_match(struct wpa_supplicant *wpa_s,
 				wpa_dbg(wpa_s, MSG_DEBUG,
 					"   skip RSN IE - proto mismatch");
 			break;
+		}
+
+		/*
+		 * Security Profile element preference (IEEE P802.11bn/D2.0,
+		 * 37.33):
+		 * If the AP advertises a Security Profile element whose profile
+		 * number implies an AKM/cipher that matches the STA's config,
+		 * augment ie.pairwise_cipher, ie.key_mgmt, and ie.capabilities
+		 * so the checks below pass even when the RSNE/RSNOE/RSNO2E
+		 * does not explicitly list those values.
+		 */
+		if (sp) {
+			int sp_key_mgmt = security_profile_get_key_mgmt(
+				sp, ssid->key_mgmt);
+
+			if (!sp_key_mgmt ||
+			    !(ssid->pairwise_cipher & WPA_CIPHER_GCMP_256)) {
+				if (debug_print)
+					wpa_dbg(wpa_s, MSG_DEBUG,
+						"   No match between AP and STA security profiles");
+				break;
+			}
+
+			if (!(ie.pairwise_cipher & WPA_CIPHER_GCMP_256)) {
+				if (debug_print)
+					wpa_dbg(wpa_s, MSG_DEBUG,
+						"   Security Profile element overrides RSNE pairwise cipher");
+				ie.pairwise_cipher |= WPA_CIPHER_GCMP_256;
+			}
+			if (!(ie.key_mgmt & ssid->key_mgmt)) {
+				if (debug_print)
+					wpa_dbg(wpa_s, MSG_DEBUG,
+						"   Security Profile element overrides RSNE key_mgmt");
+				ie.key_mgmt |= sp_key_mgmt;
+			}
+			/* All defined profiles mandate MFPC=1/MFPR=1 */
+			ie.capabilities |= WPA_CAPABILITY_MFPC |
+				WPA_CAPABILITY_MFPR;
 		}
 
 		if (!(ie.pairwise_cipher & ssid->pairwise_cipher)) {
@@ -1430,6 +1487,25 @@ static bool wpa_scan_res_ok(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 		rsnxe_capa = ie[4 + 2];
 	else if (ie && ie[1] >= 1)
 		rsnxe_capa = ie[2];
+
+	/*
+	 * Security Profile element preference (IEEE P802.11bn/D2.0, 37.33):
+	 * The Extended RSN Capabilities in the Security Profile element
+	 * take precedence over the RSNXE/RSNXOE. If the AP advertises a
+	 * Security Profile element, merge its RSNX capabilities related to SAE
+	 * into rsnxe_capa so that SAE H2E and SAE-PK checks below use the
+	 * security profile values.
+	 */
+	if (wpas_security_profile_active(wpa_s)) {
+		const u8 *sp_rsnx;
+		size_t sp_rsnx_len;
+		const u8 *sp = wpa_bss_get_ie_ext(
+			bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+		sp_rsnx = security_profile_get_rsnx(sp, &sp_rsnx_len);
+		if (sp_rsnx && sp_rsnx_len >= 1)
+			rsnxe_capa |= sp_rsnx[0] & 0xF0;
+	}
 #endif /* CONFIG_SAE */
 
 	check_ssid = wpa || ssid->ssid_len > 0;
@@ -3871,6 +3947,7 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 					  union wpa_event_data *data)
 {
 	int l, len, found = 0, wpa_found, rsn_found;
+	bool sec_prof_found;
 #ifndef CONFIG_NO_WPA
 	int found_x = 0;
 #endif /* CONFIG_NO_WPA */
@@ -4243,6 +4320,7 @@ no_pfs:
 	/* Go through the IEs and make a copy of the WPA/RSN IEs, if present.
 	 */
 	wpa_found = rsn_found = 0;
+	sec_prof_found = false;
 	while (p && l >= 2) {
 		len = p[1] + 2;
 		if (len > l) {
@@ -4278,6 +4356,13 @@ no_pfs:
 		    WPA_GET_BE32(&p[2]) == RSNXE_OVERRIDE_IE_VENDOR_TYPE)
 			wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, p, len);
 
+		if (!sec_prof_found &&
+		    p[0] == WLAN_EID_EXTENSION && p[1] >= 1 &&
+		    p[2] == WLAN_EID_EXT_SECURITY_PROFILE) {
+			sec_prof_found = true;
+			wpa_sm_set_ap_security_profile(wpa_s->wpa, p, len);
+		}
+
 		l -= len;
 		p += len;
 	}
@@ -4291,6 +4376,8 @@ no_pfs:
 		wpa_sm_set_ap_rsne_override_2(wpa_s->wpa, NULL, 0);
 		wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, NULL, 0);
 	}
+	if (!sec_prof_found && data->assoc_info.beacon_ies)
+		wpa_sm_set_ap_security_profile(wpa_s->wpa, NULL, 0);
 	if (wpa_found || rsn_found)
 		wpa_s->ap_ies_from_associnfo = 1;
 
@@ -4324,24 +4411,12 @@ no_pfs:
 
 		if (bss && is_assisted_p2p_dfs_allowed(wpa_s, bss) &&
 		    is_dfs_owner_ap(wpa_s, bss)) {
-			enum chan_width ap_operation_chan_width =
-				CHAN_WIDTH_UNKNOWN;
-			struct ieee802_11_elems resp_elems_local;
-
-			/* Parse resp_ies locally to extract AP operation
-			 * channel width */
-			if (data->assoc_info.resp_ies &&
-			    ieee802_11_parse_elems(
-				    data->assoc_info.resp_ies,
-				    data->assoc_info.resp_ies_len,
-				    &resp_elems_local, 0) != ParseFailed)
-				ap_operation_chan_width =
-					get_operation_channel_width(
-						&resp_elems_local);
-
 			wpa_s->assisted_dfs = true;
-			wpas_update_dfs_ap_info(wpa_s, wpa_s->assoc_freq,
-						ap_operation_chan_width, false);
+			wpas_update_dfs_ap_info(
+				wpa_s, wpa_s->assoc_freq,
+				wpa_s->connection_set ?
+				wpa_s->connection_channel_bandwidth :
+				CHAN_WIDTH_UNKNOWN, false);
 		}
 	} else if (wpa_s->allow_p2p_assisted_dfs && wpa_s->valid_links) {
 		/* For MLO, check other links as well for DFS */
@@ -4390,6 +4465,7 @@ static int wpa_supplicant_assoc_update_ie(struct wpa_supplicant *wpa_s)
 {
 	const u8 *bss_wpa = NULL, *bss_rsn = NULL, *bss_rsnx = NULL;
 	const u8 *rsnoe, *rsno2e, *rsnxoe;
+	const u8 *sec_prof;
 
 	if (!wpa_s->current_bss || !wpa_s->current_ssid)
 		return -1;
@@ -4407,6 +4483,8 @@ static int wpa_supplicant_assoc_update_ie(struct wpa_supplicant *wpa_s)
 				       RSNE_OVERRIDE_2_IE_VENDOR_TYPE);
 	rsnxoe = wpa_bss_get_vendor_ie(wpa_s->current_bss,
 				       RSNXE_OVERRIDE_IE_VENDOR_TYPE);
+	sec_prof = wpa_bss_get_ie_ext(wpa_s->current_bss,
+				      WLAN_EID_EXT_SECURITY_PROFILE);
 
 	if (wpa_sm_set_ap_wpa_ie(wpa_s->wpa, bss_wpa,
 				 bss_wpa ? 2 + bss_wpa[1] : 0) ||
@@ -4419,7 +4497,9 @@ static int wpa_supplicant_assoc_update_ie(struct wpa_supplicant *wpa_s)
 	    wpa_sm_set_ap_rsne_override_2(wpa_s->wpa, rsno2e,
 					  rsno2e ? 2 + rsno2e[1] : 0) ||
 	    wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, rsnxoe,
-					 rsnxoe ? 2 + rsnxoe[1] : 0))
+					 rsnxoe ? 2 + rsnxoe[1] : 0) ||
+	    wpa_sm_set_ap_security_profile(wpa_s->wpa, sec_prof,
+					   sec_prof ? 2 + sec_prof[1] : 0))
 		return -1;
 
 	return 0;
@@ -6166,6 +6246,7 @@ void wpa_supplicant_update_channel_list(struct wpa_supplicant *wpa_s,
 	}
 
 	wpas_p2p_update_channel_list(wpa_s, WPAS_P2P_CHANNEL_UPDATE_DRIVER);
+	wpas_pr_update_channel_list(wpa_s);
 }
 
 
@@ -7009,6 +7090,55 @@ static int wpas_pasn_auth(struct wpa_supplicant *wpa_s,
 	return wpas_pasn_auth_rx(wpa_s, mgmt, len);
 }
 #endif /* CONFIG_PASN */
+
+
+static void wpas_roam_status(struct wpa_supplicant *wpa_s,
+			     struct roam_auth_status *roam)
+{
+	const u8 *connected_addr = wpa_s->valid_links ?
+		wpa_s->ap_mld_addr : wpa_s->bssid;
+	const u8 *event_addr;
+
+	if (!is_zero_ether_addr(roam->ap_mld_addr)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: action=%d from " MACSTR
+			" ap_mld_addr=" MACSTR,
+			roam->action, MAC2STR(roam->bssid),
+			MAC2STR(roam->ap_mld_addr));
+		event_addr = roam->ap_mld_addr;
+	} else {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: action=%d from " MACSTR,
+			roam->action, MAC2STR(roam->bssid));
+		event_addr = roam->bssid;
+	}
+
+	if (!ether_addr_equal(event_addr, connected_addr)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: event_addr=" MACSTR
+			" does not match connected_addr=" MACSTR
+			" - ignoring",
+			MAC2STR(event_addr), MAC2STR(connected_addr));
+		return;
+	}
+
+	if (roam->action == ROAM_AUTH_STATUS_ACTION_AUTH_DONE) {
+		/*
+		 * Defer EAPOL frame processing until the matching roam
+		 * indication is received to avoid misinterpreting an
+		 * EAPOL-Key message 1 for the new association as a PTK
+		 * rekeying message for the current association. The
+		 * AUTH_DONE acknowledgement is handled internally in the
+		 * driver wrapper.
+		 */
+		wpa_s->ext_auth_to_same_bss =
+			wpa_s->wpa_state > WPA_ASSOCIATED;
+	} else if (roam->action == ROAM_AUTH_STATUS_ACTION_ROAM_ABORT) {
+		wpa_s->ext_auth_to_same_bss = false;
+		wpabuf_free(wpa_s->pending_eapol_rx);
+		wpa_s->pending_eapol_rx = NULL;
+	}
+}
 
 
 void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
@@ -8054,6 +8184,10 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 					 &data->nan_chan_evacuation_info);
 		break;
 #endif /* CONFIG_NAN */
+	case EVENT_ROAM_STATUS:
+		if (data)
+			wpas_roam_status(wpa_s, &data->roam_auth_status);
+		break;
 	default:
 		wpa_msg(wpa_s, MSG_INFO, "Unknown event %d", event);
 		break;

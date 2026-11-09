@@ -17,6 +17,8 @@
 #include "common/dpp.h"
 #include "utils/list.h"
 #include "ap_config.h"
+#include "comeback_token.h"
+#include "mld.h"
 #include "drivers/driver.h"
 
 #define OCE_STA_CFON_ENABLED(hapd) \
@@ -175,21 +177,6 @@ struct hostapd_sae_commit_queue {
 	int rssi;
 	size_t len;
 	u8 msg[];
-};
-
-struct mld_link_info {
-	u8 valid:1;
-	u8 nstr_bitmap_len:2;
-	u8 local_addr[ETH_ALEN];
-	u8 peer_addr[ETH_ALEN];
-
-	u8 nstr_bitmap[2];
-
-	u16 capability;
-
-	u16 status;
-	u16 resp_sta_profile_len;
-	u8 *resp_sta_profile;
 };
 
 /**
@@ -397,7 +384,6 @@ struct hostapd_data {
 #ifdef CONFIG_SAE
 
 #define COMEBACK_KEY_SIZE 8
-#define COMEBACK_PENDING_IDX_SIZE 256
 
 	/** Key used for generating SAE anti-clogging tokens */
 	u8 comeback_key[COMEBACK_KEY_SIZE];

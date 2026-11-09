@@ -683,6 +683,7 @@ struct hostapd_bss_config {
 	struct wpabuf *rsno2e_override;
 	struct wpabuf *rsnxe_override;
 	struct wpabuf *rsnxoe_override;
+	struct wpabuf *security_profile_override;
 	int sae_reflection_attack;
 	int sae_commit_status;
 	int sae_pk_omit;
@@ -1008,6 +1009,10 @@ struct hostapd_bss_config {
 	unsigned int pmksa_caching_privacy:1;
 	unsigned int eap_using_authentication_frames:1;
 #endif /* CONFIG_ENC_ASSOC  */
+
+	int *security_profiles; /* -1 terminated array of enabled security
+				 * profiles */
+	u64 rsnxe_capab_mask;
 };
 
 /**
@@ -1440,5 +1445,8 @@ int hostapd_add_acl_maclist(struct mac_acl_entry **acl, int *num,
 void hostapd_remove_acl_mac(struct mac_acl_entry **acl, int *num,
 			    const u8 *addr);
 bool hostapd_config_check_bss_6g(struct hostapd_bss_config *bss);
+int hostapd_config_sp_key_mgmt(const struct hostapd_bss_config *conf);
+int hostapd_config_all_key_mgmt(const struct hostapd_bss_config *conf);
+bool hostapd_config_sae_ext_key(const struct hostapd_bss_config *conf);
 
 #endif /* HOSTAPD_CONFIG_H */

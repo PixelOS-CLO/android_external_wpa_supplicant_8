@@ -2602,6 +2602,11 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 		if (iface->assisted_dfs) {
 			wpa_printf(MSG_DEBUG,
 				   "Request to start AP with assisted DFS");
+			if (hapd->started) {
+				wpa_printf(MSG_DEBUG,
+					   "AP already started, bypass assisted DFS setup request");
+				goto dfs_offload;
+			}
 		} else if (!(iface->drv_flags & WPA_DRIVER_FLAGS_DFS_OFFLOAD)) {
 			/* Handle DFS only if it is not offloaded to the driver
 			 */

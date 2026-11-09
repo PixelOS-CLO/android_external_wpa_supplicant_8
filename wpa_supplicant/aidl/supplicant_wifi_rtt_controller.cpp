@@ -63,7 +63,8 @@ void SupplicantWifiRttController::invalidate()
 {
 	wpa_global_ = nullptr;
 	is_valid_ = false;
-};
+	current_cmd_id_ = -1;
+}
 
 bool SupplicantWifiRttController::isValid() { return is_valid_; }
 
@@ -409,7 +410,6 @@ ndk::ScopedAStatus SupplicantWifiRttController::rangeRequestInternal(
 		wpa_printf(MSG_ERROR, "Ranging session already active (cmdId=%d)", current_cmd_id_);
 		return createStatus(SupplicantStatusCode::FAILURE_UNKNOWN);
 	}
-	current_cmd_id_ = cmdId;
 
 	struct wpa_supplicant* wpa_s = retrieveIfacePtr();
 	if (wpa_s == nullptr) {
@@ -490,7 +490,6 @@ ndk::ScopedAStatus SupplicantWifiRttController::rangeRequestInternal(
 	params.request_lci = rttConfig.mustRequestLci;
 	params.request_civicloc = rttConfig.mustRequestLcr;
 	params.continuous_ranging_session_time = pdConfig.continuousRangingSessionTimeMillis;
-	params.forced_pr_freq = pdConfig.preferredRangingChannelFrequencyMhz;
 
 	/* PD-specific parameters */
 	if (pdConfig.configRangingIndications &
@@ -519,7 +518,11 @@ ndk::ScopedAStatus SupplicantWifiRttController::rangeRequestInternal(
 		wpa_printf(MSG_ERROR, "Failed to set PASN secure config");
 		return createStatus(SupplicantStatusCode::FAILURE_ARGS_INVALID);
 	}
-	wpas_pr_pasn_trigger(wpa_s, &params);
+	if (wpas_pr_pasn_trigger(wpa_s, &params) < 0) {
+		wpa_printf(MSG_ERROR, "Failed to trigger PASN");
+		return createStatus(SupplicantStatusCode::FAILURE_UNKNOWN);
+	}
+	current_cmd_id_ = cmdId;
 
 	return ndk::ScopedAStatus::ok();
 }
@@ -540,12 +543,6 @@ ndk::ScopedAStatus SupplicantWifiRttController::rangeCancelInternal(
 
 	wpas_pr_abort_ranging(wpa_s);
 
-	AidlManager *aidl_manager = AidlManager::getInstance();
-	if (aidl_manager) {
-		aidl_manager->notifyRttContinuousRangingTerminatedEvent(wpa_s, 
-			static_cast<u32>(ISupplicantWifiRttControllerEventCallback::
-			ContinuousRangingTerminateReasonCode::USER_REQUEST));
-	}
 	current_cmd_id_ = -1;
 	return ndk::ScopedAStatus::ok();
 }

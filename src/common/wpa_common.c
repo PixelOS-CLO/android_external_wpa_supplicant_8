@@ -16,6 +16,7 @@
 #include "crypto/sha512.h"
 #include "crypto/aes_wrap.h"
 #include "crypto/crypto.h"
+#include "crypto/random.h"
 #include "ieee802_11_defs.h"
 #include "ieee802_11_common.h"
 #include "defs.h"
@@ -581,6 +582,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha384_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA384;
 #else /* CONFIG_SHA384 */
 		return -1;
 #endif /* CONFIG_SHA384 */
@@ -589,6 +591,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha256_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA256;
 #ifdef CONFIG_OWE
 	} else if (akmp == WPA_KEY_MGMT_OWE && (pmk_len == 32 ||
 						owe_ptk_workaround)) {
@@ -596,16 +599,24 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha256_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		if (owe_ptk_workaround && pmk_len == 64)
+			ptk->hash_alg = RSN_HASH_SHA512;
+		else if (owe_ptk_workaround && pmk_len == 48)
+			ptk->hash_alg = RSN_HASH_SHA384;
+		else
+			ptk->hash_alg = RSN_HASH_SHA256;
 	} else if (akmp == WPA_KEY_MGMT_OWE && pmk_len == 48) {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA384)");
 		if (sha384_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA384;
 	} else if (akmp == WPA_KEY_MGMT_OWE && pmk_len == 64) {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA512)");
 		if (sha512_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA512;
 	} else if (akmp == WPA_KEY_MGMT_OWE) {
 		wpa_printf(MSG_INFO, "OWE: Unknown PMK length %u",
 			   (unsigned int) pmk_len);
@@ -673,6 +684,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha1_prf(pmk, pmk_len, label, data, data_len, tmp,
 			     ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA1;
 	}
 
 	wpa_printf(MSG_DEBUG, "WPA: PTK derivation - A1=" MACSTR " A2=" MACSTR,
@@ -4173,6 +4185,15 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 			   pos[2] == WLAN_EID_EXT_EHT_CAPABILITIES) {
 			ie->eht_capabilities = pos + 3;
 			ie->eht_capab_len = pos[1] - 1;
+		} else if (*pos == WLAN_EID_EXTENSION &&
+			   pos[1] >= 3 &&
+			   pos[2] == WLAN_EID_EXT_SECURITY_PROFILE) {
+			ie->security_profile = pos;
+			ie->security_profile_len = dlen;
+			wpa_hexdump(MSG_DEBUG,
+				    "WPA: Security Profile element in EAPOL-Key",
+				    ie->security_profile,
+				    ie->security_profile_len);
 		} else if (*pos == WLAN_EID_QOS && pos[1] >= 1) {
 			ie->qosinfo = pos[2];
 		} else if (*pos == WLAN_EID_SUPPORTED_CHANNELS) {
@@ -4260,14 +4281,41 @@ void wpa_pasn_build_auth_header(struct wpabuf *buf, const u8 *bssid,
 }
 
 
+#ifdef CONFIG_TESTING_OPTIONS
+int wpa_rsne_inject_random_pmkids(u8 **pos, unsigned int count)
+{
+	unsigned int i;
+
+	wpa_printf(MSG_INFO, "TESTING: Inject %u random PMKID(s) into RSNE",
+		   count);
+	WPA_PUT_LE16(*pos, count);
+	*pos += 2;
+	for (i = 0; i < count; i++) {
+		if (random_get_bytes(*pos, PMKID_LEN) < 0) {
+			wpa_printf(MSG_WARNING,
+				   "TESTING: Failed to generate random PMKID");
+			return -1;
+		}
+		wpa_hexdump(MSG_DEBUG, "TESTING: Random PMKID",
+			    *pos, PMKID_LEN);
+		*pos += PMKID_LEN;
+	}
+	return 0;
+}
+#endif /* CONFIG_TESTING_OPTIONS */
+
+
 /*
  * wpa_pasn_add_rsne - Add an RSNE for PASN authentication
  * @buf: Buffer in which the IE will be added
  * @pmkid: Optional PMKID. Can be NULL.
  * @akmp: Authentication and key management protocol
  * @cipher: The cipher suite
+ * @random_pmkid_count: Number of random PMKIDs to add; only for testing
+ * purposes
  */
-int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher)
+int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher,
+		      unsigned int random_pmkid_count)
 {
 	struct rsn_ie_hdr *hdr;
 	u32 suite;
@@ -4280,6 +4328,8 @@ int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher)
 	rsne_len = sizeof(*hdr) + RSN_SELECTOR_LEN +
 		2 + RSN_SELECTOR_LEN + 2 + RSN_SELECTOR_LEN +
 		2 + RSN_SELECTOR_LEN + 2 + (pmkid ? PMKID_LEN : 0);
+	if (!pmkid && random_pmkid_count > 0)
+		rsne_len += 2 + random_pmkid_count * PMKID_LEN;
 
 	if (wpabuf_tailroom(buf) < rsne_len)
 		return -1;
@@ -4353,6 +4403,12 @@ int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher)
 	WPA_PUT_LE16(pos, capab);
 	pos += 2;
 
+#ifdef CONFIG_TESTING_OPTIONS
+	if (!pmkid && random_pmkid_count > 0) {
+		if (wpa_rsne_inject_random_pmkids(&pos, random_pmkid_count) < 0)
+			return -1;
+	} else
+#endif /* CONFIG_TESTING_OPTIONS */
 	if (pmkid) {
 		wpa_printf(MSG_DEBUG, "PASN: Adding PMKID");
 
@@ -4801,4 +4857,112 @@ void wpa_add_supported_groups(struct wpabuf *buf, const int *groups)
 	wpabuf_put_u8(buf, WLAN_EID_EXT_SUPPORTED_GROUPS);
 	for (i = 0; i < count; i++)
 		wpabuf_put_le16(buf, groups[i]);
+}
+
+
+static const struct security_profile_entry
+security_profile_table[] = {
+	/* number, key_mgmt, pairwise_cipher, ieee8021x_auth_frame,
+	 * assoc_frame_encrypt, pmksa_caching_privacy */
+
+	/* 0: EPPKE (AKM 29), unauth‑EPPKE allowed */
+	{ 0, WPA_KEY_MGMT_EPPKE, WPA_CIPHER_GCMP_256, false, true, true },
+
+	/* 1: EPPKE + SAE (AKM 29+24) */
+	{ 1, WPA_KEY_MGMT_EPPKE | WPA_KEY_MGMT_SAE_EXT_KEY,
+	  WPA_CIPHER_GCMP_256, false, true, true },
+
+	/* 2: EPPKE + FT‑SAE (AKM 29+25) */
+	{ 2, WPA_KEY_MGMT_EPPKE | WPA_KEY_MGMT_FT_SAE_EXT_KEY,
+	  WPA_CIPHER_GCMP_256, false, true, true },
+
+	/* 3: EPP 802.1X (AKM 5) */
+	{ 3, WPA_KEY_MGMT_IEEE8021X_SHA256, WPA_CIPHER_GCMP_256,
+	  true, true, true },
+
+	/* 4: EPP FT‑802.1X (AKM 3) */
+	{ 4, WPA_KEY_MGMT_FT_IEEE8021X, WPA_CIPHER_GCMP_256, true, true, true },
+
+	/* 5: EPP 802.1X (AKM 23) */
+	{ 5, WPA_KEY_MGMT_IEEE8021X_SHA384, WPA_CIPHER_GCMP_256,
+	  true, true, true },
+
+	/* 6: EPP FT‑802.1X (AKM 22) */
+	{ 6, WPA_KEY_MGMT_FT_IEEE8021X_SHA384, WPA_CIPHER_GCMP_256,
+	  true, true, true },
+
+	/* 7: EPP 802.1X (AKM 12) */
+	{ 7, WPA_KEY_MGMT_IEEE8021X_SUITE_B_192,  WPA_CIPHER_GCMP_256,
+	  true, true, true },
+
+	/* 8: OWE (AKM 18) */
+	{ 8, WPA_KEY_MGMT_OWE, WPA_CIPHER_GCMP_256, false, false, false },
+
+	/* 9: SAE (AKM 24) */
+	{ 9, WPA_KEY_MGMT_SAE_EXT_KEY, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 10: FT‑SAE (AKM 25) */
+	{ 10, WPA_KEY_MGMT_FT_SAE_EXT_KEY, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 11: 802.1X (AKM 5) */
+	{ 11, WPA_KEY_MGMT_IEEE8021X_SHA256, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 12: FT‑802.1X (AKM 3) */
+	{ 12, WPA_KEY_MGMT_FT_IEEE8021X, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 13: 802.1X (AKM 23) */
+	{ 13, WPA_KEY_MGMT_IEEE8021X_SHA384, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 14: FT‑802.1X (AKM 22) */
+	{ 14, WPA_KEY_MGMT_FT_IEEE8021X_SHA384, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+
+	/* 15: 802.1X (AKM 12) */
+	{ 15, WPA_KEY_MGMT_IEEE8021X_SUITE_B_192, WPA_CIPHER_GCMP_256,
+	  false, false, false },
+};
+
+
+/**
+ * sec_prof_implied_key_mgmt - Derive implied key_mgmt from security profiles
+ * @profiles: -1 terminated int array of enabled security profile numbers
+ * Returns: Union of all AKMs defined by the enabled security profiles
+ */
+int sec_prof_implied_key_mgmt(const int *profiles)
+{
+	int i, implied = 0;
+
+	if (!profiles)
+		return 0;
+
+	for (i = 0; profiles[i] >= 0; i++) {
+		const struct security_profile_entry *sp;
+
+		sp = sec_prof_get(profiles[i]);
+		if (sp)
+			implied |= sp->key_mgmt;
+	}
+
+	return implied;
+}
+
+
+const struct security_profile_entry * sec_prof_get(int p)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(security_profile_table); i++) {
+		const struct security_profile_entry *sp;
+
+		sp = &security_profile_table[i];
+		if (sp->number == p)
+			return sp;
+	}
+
+	return NULL;
 }

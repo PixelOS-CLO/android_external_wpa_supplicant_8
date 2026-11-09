@@ -31,6 +31,7 @@
 
 enum rsn_hash_alg {
 	RSN_HASH_NOT_SPECIFIED,
+	RSN_HASH_SHA1,
 	RSN_HASH_SHA256,
 	RSN_HASH_SHA384,
 	RSN_HASH_SHA512,
@@ -751,6 +752,8 @@ struct wpa_eapol_ie_parse {
 	size_t nan_nik_len;
 	const u8 *nan_key_lifetime;
 	size_t nan_key_lifetime_len;
+	const u8 *security_profile;
+	size_t security_profile_len;
 	u16 valid_mlo_gtks; /* bitmap of valid link GTK KDEs */
 	const u8 *mlo_gtk[MAX_NUM_MLD_LINKS];
 	size_t mlo_gtk_len[MAX_NUM_MLD_LINKS];
@@ -825,7 +828,8 @@ void wpa_pasn_build_auth_header(struct wpabuf *buf, const u8 *bssid,
 				u8 trans_seq, u16 status, bool is_eppke);
 
 int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid,
-		      int akmp, int cipher);
+		      int akmp, int cipher, unsigned int random_pmkid_count);
+int wpa_rsne_inject_random_pmkids(u8 **pos, unsigned int count);
 
 void wpa_pasn_add_parameter_ie(struct wpabuf *buf, u16 pasn_group,
 			       u8 wrapped_data_format,
@@ -854,5 +858,20 @@ int wpa_auth_802_1x_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const u8 *spa,
 			       size_t dhss_len, struct wpa_ptk *ptk,
 			       size_t kdk_len);
 void wpa_add_supported_groups(struct wpabuf *buf, const int *groups);
+
+/* Security Profile entry (IEEE P802.11bn/D2.0) */
+struct security_profile_entry {
+	int number;
+	int key_mgmt;
+	int pairwise_cipher;
+	bool ieee8021x_auth_frame;
+	bool assoc_frame_encrypt;
+	bool pmksa_caching_privacy;
+};
+
+
+
+int sec_prof_implied_key_mgmt(const int *profiles);
+const struct security_profile_entry * sec_prof_get(int p);
 
 #endif /* WPA_COMMON_H */

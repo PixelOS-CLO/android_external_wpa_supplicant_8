@@ -8066,6 +8066,9 @@ static int nl80211_connect_ext(struct i802_bss *bss,
 					QCA_CONNECT_EXT_FEATURE_OKC_PMKID_IN_ASSOC);
 	}
 
+	wpa_printf(MSG_DEBUG, "- Roam status synchronization support");
+	connect_ext_feature_set(features, QCA_CONNECT_EXT_FEATURE_ROAM_STATUS);
+
 	if (nla_put(msg, QCA_WLAN_VENDOR_ATTR_CONNECT_EXT_FEATURES,
 		    sizeof(features), features))
 		goto fail;
@@ -14781,6 +14784,10 @@ fail:
 }
 
 
+static const u8 qca_usd_default_network_id[ETH_ALEN] = {
+	0x51, 0x6f, 0x9a, 0x02, 0x00, 0x00
+};
+
 static int nl80211_nan_publish(void *priv, const u8 *src, int publish_id,
 			       const char *service_name, const u8 *service_id,
 			       enum nan_service_protocol_type srv_proto_type,
@@ -14824,8 +14831,10 @@ static int nl80211_nan_publish(void *priv, const u8 *src, int publish_id,
 		    wpabuf_len(elems), wpabuf_head(elems))) ||
 	    (ssi && nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_SSI,
 			    wpabuf_len(ssi), wpabuf_head(ssi))) ||
-	    (network_id && nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_NETWORK_ID,
-				   ETH_ALEN, network_id)))
+	    (network_id &&
+	     !ether_addr_equal(network_id, qca_usd_default_network_id) &&
+	     nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_NETWORK_ID, ETH_ALEN,
+		     network_id)))
 		goto fail;
 
 	attr = nla_nest_start(msg, QCA_WLAN_VENDOR_ATTR_USD_CHAN_CONFIG);
@@ -14980,8 +14989,10 @@ static int nl80211_nan_subscribe(void *priv, const u8 *src, int subscribe_id,
 		    wpabuf_len(elems), wpabuf_head(elems))) ||
 	    (ssi && nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_SSI,
 			    wpabuf_len(ssi), wpabuf_head(ssi))) ||
-	    (network_id && nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_NETWORK_ID,
-				   ETH_ALEN, network_id)))
+	    (network_id &&
+	     !ether_addr_equal(network_id, qca_usd_default_network_id) &&
+	     nla_put(msg, QCA_WLAN_VENDOR_ATTR_USD_NETWORK_ID, ETH_ALEN,
+		     network_id)))
 		goto fail;
 
 	attr = nla_nest_start(msg, QCA_WLAN_VENDOR_ATTR_USD_CHAN_CONFIG);

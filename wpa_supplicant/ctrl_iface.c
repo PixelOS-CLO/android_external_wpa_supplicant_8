@@ -831,6 +831,20 @@ static int wpa_supplicant_ctrl_iface_set(struct wpa_supplicant *wpa_s,
 			wpa_s->rsnxe_override_eapol = NULL;
 		else
 			wpa_s->rsnxe_override_eapol = wpabuf_parse_bin(value);
+	} else if (os_strcasecmp(cmd, "sec_prof_override_auth") == 0) {
+		wpabuf_free(wpa_s->sec_prof_override_auth);
+		if (os_strcmp(value, "NULL") == 0)
+			wpa_s->sec_prof_override_auth = NULL;
+		else
+			wpa_s->sec_prof_override_auth =
+				wpabuf_parse_bin(value);
+	} else if (os_strcasecmp(cmd, "sec_prof_override_assoc") == 0) {
+		wpabuf_free(wpa_s->sec_prof_override_assoc);
+		if (os_strcmp(value, "NULL") == 0)
+			wpa_s->sec_prof_override_assoc = NULL;
+		else
+			wpa_s->sec_prof_override_assoc =
+				wpabuf_parse_bin(value);
 	} else if (os_strcasecmp(cmd, "link_ies") == 0) {
 		int link_id = atoi(value);
 		char *pos;
@@ -5046,6 +5060,16 @@ int wpa_supplicant_ctrl_iface_get_capability(
 	}
 #endif /* CONFIG_P2P */
 
+	if (os_strcmp(field, "security_profile") == 0) {
+		if (wpas_security_profile_active(wpa_s))
+			res = os_snprintf(buf, buflen, "supported");
+		else
+			res = os_snprintf(buf, buflen, "not supported");
+		if (os_snprintf_error(buflen, res))
+			return -1;
+		return res;
+	}
+
 	wpa_printf(MSG_DEBUG, "CTRL_IFACE: Unknown GET_CAPABILITY field '%s'",
 		   field);
 
@@ -9143,6 +9167,10 @@ static void wpa_supplicant_ctrl_iface_flush(struct wpa_supplicant *wpa_s)
 	wpa_s->rsnxe_override_assoc = NULL;
 	wpabuf_free(wpa_s->rsnxe_override_eapol);
 	wpa_s->rsnxe_override_eapol = NULL;
+	wpabuf_free(wpa_s->sec_prof_override_auth);
+	wpa_s->sec_prof_override_auth = NULL;
+	wpabuf_free(wpa_s->sec_prof_override_assoc);
+	wpa_s->sec_prof_override_assoc = NULL;
 	wpas_clear_driver_signal_override(wpa_s);
 	{
 		int i;
@@ -9178,6 +9206,8 @@ static void wpa_supplicant_ctrl_iface_flush(struct wpa_supplicant *wpa_s)
 	wpa_s->dpp_discard_public_action = 0;
 	dpp_test = DPP_TEST_DISABLED;
 #endif /* CONFIG_DPP */
+	wpa_sm_set_test_random_pmkid_count(wpa_s->wpa, 0);
+	wpa_s->pasn.test_random_pmkid_count = 0;
 #endif /* CONFIG_TESTING_OPTIONS */
 
 	wpa_s->disconnected = 0;
@@ -14296,6 +14326,18 @@ char * wpa_supplicant_ctrl_iface_process(struct wpa_supplicant *wpa_s,
 	} else if (os_strncmp(buf, "TEST_ASSOC_IE ", 14) == 0) {
 		if (wpas_ctrl_test_assoc_ie(wpa_s, buf + 14) < 0)
 			reply_len = -1;
+	} else if (os_strncmp(buf, "TEST_RANDOM_PMKID_COUNT ", 24) == 0) {
+		int count = atoi(buf + 24);
+
+		if (count < 0 || count > 10) {
+			wpa_printf(MSG_INFO,
+				   "TESTING: Invalid random PMKID count %d (valid range: 0-10)",
+				   count);
+			reply_len = -1;
+		} else {
+			wpa_sm_set_test_random_pmkid_count(wpa_s->wpa, count);
+			wpa_s->pasn.test_random_pmkid_count = count;
+		}
 	} else if (os_strncmp(buf, "TEST_EAPOL_M2_ELEMS ", 20) == 0) {
 		if (wpas_ctrl_test_eapol_m2_elems(wpa_s, buf + 20) < 0)
 			reply_len = -1;

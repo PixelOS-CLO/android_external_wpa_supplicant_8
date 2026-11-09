@@ -24,6 +24,7 @@ extern "C"
 #include "rsn_supp/wpa.h"
 #include "rsn_supp/pmksa_cache.h"
 #include "src/common/nan_de.h"
+#include "pr_supplicant.h"
 }
 
 namespace {
@@ -405,8 +406,65 @@ bool validateUsdSubscribeConfig(UsdSubscribeConfig subscribeConfig) {
 	return true;
 }
 
-struct nan_publish_params convertAidlNanPublishParamsToInternal(const UsdPublishConfig& publishConfig) {
-	struct nan_publish_params nanPublishParams;
+template <typename Params>
+void populateUsdFreqListAndRangingMac(
+		Params& params,
+		const UsdBaseConfig& baseConfig,
+		const std::array<uint8_t, 6>& proximityRangingMacAddress,
+		std::vector<int32_t>& freqListOut) {
+	if (!baseConfig.freqsMhz.empty()) {
+		freqListOut = baseConfig.freqsMhz;
+		freqListOut.push_back(0); // Mandatory 0-terminator for int_array_len()
+		params.freq_list = freqListOut.data();
+	} else {
+		params.freq_list = nullptr;
+	}
+
+	static const std::array<uint8_t, 6> zero_mac = {0, 0, 0, 0, 0, 0};
+	if (baseConfig.isRangingEnabled) {
+		if (proximityRangingMacAddress != zero_mac) {
+			params.forced_addr = proximityRangingMacAddress.data();
+			params.proximity_ranging = true;
+			wpa_printf(MSG_DEBUG, "USD: using proximity ranging MAC address: "
+				   MACSTR, MAC2STR(proximityRangingMacAddress.data()));
+		} else {
+			wpa_printf(MSG_WARNING,
+				   "USD: ranging is enabled but proximity ranging MAC address is not updated yet.");
+		}
+	}
+}
+
+void setUsdDevIks(struct wpa_supplicant *wpa_s, const UsdBaseConfig& base) {
+	if (base.selfDevIk.has_value()) {
+		if (base.selfDevIk->data.size() == DEVICE_IDENTITY_KEY_LEN) {
+			wpas_pr_set_dev_ik(wpa_s, base.selfDevIk->data.data(),
+					   nullptr, nullptr, 0, true /* own */);
+		} else {
+			wpa_printf(MSG_WARNING,
+				   "USD: selfDevIk size mismatch (%zu != %d), skipping",
+				   base.selfDevIk->data.size(), DEVICE_IDENTITY_KEY_LEN);
+		}
+	}
+	if (base.peerDevIks.has_value()) {
+		for (const auto& peerKey : *base.peerDevIks) {
+			if (!peerKey.has_value()) continue;
+			if (peerKey->data.size() == DEVICE_IDENTITY_KEY_LEN) {
+				wpas_pr_set_dev_ik(wpa_s, peerKey->data.data(),
+						   nullptr, nullptr, 0, false /* peer */);
+			} else {
+				wpa_printf(MSG_WARNING,
+					   "USD: peerDevIk size mismatch (%zu != %d), skipping",
+					   peerKey->data.size(), DEVICE_IDENTITY_KEY_LEN);
+			}
+		}
+	}
+}
+
+struct nan_publish_params convertAidlNanPublishParamsToInternal(
+		const UsdPublishConfig& publishConfig,
+		const std::array<uint8_t, 6>& proximityRangingMacAddress,
+		std::vector<int32_t>& freqListOut) {
+	struct nan_publish_params nanPublishParams{};
 	nanPublishParams.unsolicited =
 		publishConfig.publishType == UsdPublishConfig::PublishType::UNSOLICITED_ONLY
 			|| publishConfig.publishType == UsdPublishConfig::PublishType::SOLICITED_AND_UNSOLICITED;
@@ -420,21 +478,25 @@ struct nan_publish_params convertAidlNanPublishParamsToInternal(const UsdPublish
 	nanPublishParams.freq = publishConfig.usdBaseConfig.defaultFreqMhz;
 	nanPublishParams.announcement_period = publishConfig.announcementPeriodMillis;
 	nanPublishParams.disable_events = !publishConfig.eventsEnabled;
-	// Pass the original pointer to the freq list, since the receiver will memcpy the data
-	nanPublishParams.freq_list = publishConfig.usdBaseConfig.freqsMhz.data();
+
+	populateUsdFreqListAndRangingMac(nanPublishParams, publishConfig.usdBaseConfig,
+					 proximityRangingMacAddress, freqListOut);
 	return nanPublishParams;
 }
 
 struct nan_subscribe_params convertAidlNanSubscribeParamsToInternal(
-		const UsdSubscribeConfig& subscribeConfig) {
-	struct nan_subscribe_params nanSubscribeParams;
+		const UsdSubscribeConfig& subscribeConfig,
+		const std::array<uint8_t, 6>& proximityRangingMacAddress,
+		std::vector<int32_t>& freqListOut) {
+	struct nan_subscribe_params nanSubscribeParams{};
 	nanSubscribeParams.active =
 		subscribeConfig.subscribeType == UsdSubscribeConfig::SubscribeType::ACTIVE_MODE;
 	nanSubscribeParams.ttl = subscribeConfig.usdBaseConfig.ttlSec;
 	nanSubscribeParams.freq = subscribeConfig.usdBaseConfig.defaultFreqMhz;
 	nanSubscribeParams.query_period = subscribeConfig.queryPeriodMillis;
-	// Pass the original pointer to the freq list, since the receiver will memcpy the data
-	nanSubscribeParams.freq_list = subscribeConfig.usdBaseConfig.freqsMhz.data();
+
+	populateUsdFreqListAndRangingMac(nanSubscribeParams, subscribeConfig.usdBaseConfig,
+					 proximityRangingMacAddress, freqListOut);
 	return nanSubscribeParams;
 }
 
@@ -2758,6 +2820,8 @@ std::pair<UsdCapabilities, ndk::ScopedAStatus> StaIface::getUsdCapabilitiesInter
 	capabilities.maxMatchFilterLengthBytes = kMaxUsdMatchFilterLengthBytes;
 	capabilities.maxNumPublishSessions = kMaxNumUsdPublishSessions;
 	capabilities.maxNumSubscribeSessions = kMaxNumUsdSubscribeSessions;
+	// PR is supported if the pr_data context has been successfully initialized
+	capabilities.isProximityRangingSupported = (wpa_global_ != nullptr && wpa_global_->pr != nullptr);
 	return {capabilities, ndk::ScopedAStatus::ok()};
 }
 
@@ -2774,36 +2838,21 @@ ndk::ScopedAStatus StaIface::startUsdPublishInternal(
 	}
 
 	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
-	struct nan_publish_params nanPublishParams =
-		convertAidlNanPublishParamsToInternal(usdPublishConfig);
-
-	static const std::array<uint8_t, 6> zero_mac = {0, 0, 0, 0, 0, 0};
-	if (usdPublishConfig.usdBaseConfig.isRangingEnabled) {
-		if (proximity_ranging_mac_address_ != zero_mac) {
-			nanPublishParams.forced_addr = proximity_ranging_mac_address_.data();
-			nanPublishParams.proximity_ranging = true;
-			wpa_printf(MSG_DEBUG, "USD publish: using proximity ranging MAC address: "
-				   MACSTR, MAC2STR(proximity_ranging_mac_address_.data()));
-		} else {
-			wpa_printf(MSG_WARNING,
-				"USD publish: ranging is enabled but proximity ranging MAC address is not updated yet.");
-		}
-	}
-
 	std::vector<int32_t> freqListCopy;
-	if (!usdPublishConfig.usdBaseConfig.freqsMhz.empty()) {
-		freqListCopy = usdPublishConfig.usdBaseConfig.freqsMhz;
-		freqListCopy.push_back(0);
-		nanPublishParams.freq_list = freqListCopy.data();
-	} else {
-		nanPublishParams.freq_list = nullptr;
+	struct nan_publish_params nanPublishParams =
+		convertAidlNanPublishParamsToInternal(
+			usdPublishConfig, proximity_ranging_mac_address_, freqListCopy);
+
+	if (nanPublishParams.proximity_ranging) {
+		setUsdDevIks(wpa_s, usdPublishConfig.usdBaseConfig);
 	}
 
 	int publishId = wpas_nan_publish(
 		wpa_s, usdPublishConfig.usdBaseConfig.serviceName.c_str(),
 		convertAidlServiceProtoTypeToInternal(
 			usdPublishConfig.usdBaseConfig.serviceProtoType),
-		ssiBuffer.get(), &nanPublishParams, false /* p2p */);
+		wpabuf_len(ssiBuffer.get()) == 0 ? nullptr : ssiBuffer.get(),
+		&nanPublishParams, false /* p2p */);
 
 	// Core supplicant does not have an internal callback for USD publish, but some
 	// implementations may decide to offload and return the result in a callback.
@@ -2833,36 +2882,21 @@ ndk::ScopedAStatus StaIface::startUsdSubscribeInternal(
 	}
 
 	struct wpa_supplicant *wpa_s = retrieveIfacePtr();
-	struct nan_subscribe_params nanSubscribeParams =
-		convertAidlNanSubscribeParamsToInternal(usdSubscribeConfig);
-
-	static const std::array<uint8_t, 6> zero_mac = {0, 0, 0, 0, 0, 0};
-	if (usdSubscribeConfig.usdBaseConfig.isRangingEnabled) {
-		if (proximity_ranging_mac_address_ != zero_mac) {
-			nanSubscribeParams.forced_addr = proximity_ranging_mac_address_.data();
-			nanSubscribeParams.proximity_ranging = true;
-			wpa_printf(MSG_DEBUG, "USD subscribe: using proximity ranging MAC address: "
-				   MACSTR, MAC2STR(proximity_ranging_mac_address_.data()));
-		} else {
-			wpa_printf(MSG_WARNING,
-			"USD subscribe: ranging is enabled but proximity ranging MAC address is not updated yet.");
-		}
-	}
-
 	std::vector<int32_t> freqListCopy;
-	if (!usdSubscribeConfig.usdBaseConfig.freqsMhz.empty()) {
-		freqListCopy = usdSubscribeConfig.usdBaseConfig.freqsMhz;
-		freqListCopy.push_back(0);
-		nanSubscribeParams.freq_list = freqListCopy.data();
-	} else {
-		nanSubscribeParams.freq_list = nullptr;
+	struct nan_subscribe_params nanSubscribeParams =
+		convertAidlNanSubscribeParamsToInternal(
+			usdSubscribeConfig, proximity_ranging_mac_address_, freqListCopy);
+
+	if (nanSubscribeParams.proximity_ranging) {
+		setUsdDevIks(wpa_s, usdSubscribeConfig.usdBaseConfig);
 	}
 
 	int subscribeId = wpas_nan_subscribe(
 		wpa_s, usdSubscribeConfig.usdBaseConfig.serviceName.c_str(),
 		convertAidlServiceProtoTypeToInternal(
 			usdSubscribeConfig.usdBaseConfig.serviceProtoType),
-		ssiBuffer.get(), &nanSubscribeParams, false /* p2p */);
+		wpabuf_len(ssiBuffer.get()) == 0 ? nullptr : ssiBuffer.get(),
+		&nanSubscribeParams, false /* p2p */);
 
 	// See comment in startUsdPublishInternal regarding callbacks
 	AidlManager *aidl_manager = AidlManager::getInstance();
@@ -2891,7 +2925,8 @@ ndk::ScopedAStatus StaIface::startUsdSubscribeInternal(
 		return createStatus(SupplicantStatusCode::FAILURE_UNKNOWN);
 	}
 	int status = wpas_nan_update_publish(
-		retrieveIfacePtr(), publishId, ssiBuffer.get());
+		retrieveIfacePtr(), publishId,
+		wpabuf_len(ssiBuffer.get()) == 0 ? nullptr : ssiBuffer.get());
 	if (status < 0) {
 		wpa_printf(MSG_INFO, "Failed to update USD publish");
 		return createStatus(SupplicantStatusCode::FAILURE_UNKNOWN);

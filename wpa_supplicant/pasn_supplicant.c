@@ -762,9 +762,35 @@ static struct wpa_bss * wpas_pasn_allowed(struct wpa_supplicant *wpa_s,
 
 	if (!(rsne_data.key_mgmt & akmp) ||
 	    !(rsne_data.pairwise_cipher & cipher)) {
+		bool sp_match = false;
+
+		/*
+		 * The AP's RSNE may omit GCMP-256 or the requested AKM while
+		 * still supporting it via a Security Profile element (IEEE
+		 * P802.11bn/D2.0, 37.33). wpa_supplicant_set_suites() allows
+		 * GCMP-256 in this case for the normal association path; apply
+		 * the same allowance here so PASN does not reject an
+		 * AKMP/cipher combination that the rest of the connection flow
+		 * would accept.
+		 */
+		if (wpas_security_profile_active(wpa_s) &&
+		    cipher == WPA_CIPHER_GCMP_256) {
+			const u8 *sp = wpa_bss_get_ie_ext(
+				bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+			if (security_profile_get_key_mgmt(sp, akmp))
+				sp_match = true;
+		}
+
+		if (!sp_match) {
+			wpa_printf(MSG_DEBUG,
+				   "PASN: AP does not support requested AKMP or cipher");
+			return NULL;
+		}
+
 		wpa_printf(MSG_DEBUG,
-			   "PASN: AP does not support requested AKMP or cipher");
-		return NULL;
+			   "PASN: AP advertises matching Security Profile for AKMP 0x%x - allowing GCMP-256 despite RSNE",
+			   akmp);
 	}
 
 #ifdef CONFIG_ENC_ASSOC
@@ -799,7 +825,8 @@ static int wpas_eppke_set_rsne(struct wpa_supplicant *wpa_s,
 	u8 rsne[257];
 	int rsne_len;
 
-	rsne_len = wpa_external_auth_add_rsne(rsne, sizeof(rsne),
+	rsne_len = wpa_external_auth_add_rsne(wpa_s->wpa,
+					      rsne, sizeof(rsne),
 					      awork->akmp, awork->cipher,
 					      awork->group_cipher,
 					      awork->group_mgmt_cipher,
@@ -819,6 +846,89 @@ static int wpas_eppke_set_rsne(struct wpa_supplicant *wpa_s,
 		   awork->group_cipher, awork->group_mgmt_cipher,
 		   awork->rsn_capab);
 	return 0;
+}
+#endif /* CONFIG_ENC_ASSOC */
+
+
+#ifdef CONFIG_ENC_ASSOC
+static void wpas_pasn_sec_prof_eppke(struct wpa_supplicant *wpa_s,
+				     struct pasn_data *pasn,
+				     struct wpa_pasn_auth_work *awork,
+				     struct wpa_bss *bss)
+{
+	const u8 *sp, *bitmap;
+	const struct security_profile_entry *profile = NULL;
+	u8 bitmap_len;
+	u8 sp_buf[256];
+	int sp_len;
+
+	if (!wpas_security_profile_active(wpa_s))
+		return;
+
+	/*
+	 * Security Profile + EPPKE (external auth path):
+	 * Populate the Security Profile IE based on driver parameters
+	 * given in external auth (awork->akmp, awork->cipher).
+	 *
+	 * Per IEEE P802.11bn/D2.0, 37.33, include the Security Profile element
+	 * in EPPKE Auth1 frame only when all three conditions are met:
+	 *   1. Security profile support is active
+	 *   2. AP is advertising the Security Profile element
+	 *   3. A matching profile number can be derived from the
+	 *      driver-provided AKM (awork->akmp) and pairwise cipher
+	 *      (awork->cipher)
+	 *
+	 * Auth1 contains RSNE; Auth3 does not -- so this element is
+	 * appended to Auth1 only via pasn_set_security_profile().
+	 * This is independent of SMD.
+	 */
+
+	sp = wpa_bss_get_ie_ext(bss, WLAN_EID_EXT_SECURITY_PROFILE);
+	if (!sp || sp[1] < 3)
+		return;
+
+	bitmap_len = sp[4] & 0x0F;
+	if (sp[1] < 3 + bitmap_len)
+		return;
+
+	bitmap = sp + 5;
+
+	/*
+	 * Use security_profile_select_num() to uniquely identify the profile.
+	 *
+	 * For EPPKE external auth, eap_over_auth is always false (EPPKE is not
+	 * 802.1X). EPPKE sub-profile disambiguation (profiles 0/1/2) is handled
+	 * by awork->akmp itself. Per IEEE P802.11bn/D2.0, Table 9-bb18,
+	 * profiles 1 and 2 use the SAE_EXT_KEY (hash-to-element) AKM variants
+	 * specifically, not the legacy SAE/FT-SAE AKMs:
+	 *   WPA_KEY_MGMT_EPPKE          -> profile 0
+	 *   WPA_KEY_MGMT_SAE_EXT_KEY    -> profile 1
+	 *   WPA_KEY_MGMT_FT_SAE_EXT_KEY -> profile 2
+	 * No new driver attribute is required.
+	 */
+	profile = security_profile_select(awork->akmp, awork->cipher,
+					  false, true, bitmap, bitmap_len);
+	if (!profile)
+		return;
+
+	/*
+	 * External auth path: build the Security Profile element from the
+	 * actual driver-negotiated RSN Capabilities (awork->rsn_capab) and
+	 * RSNXE (awork->rsnxe_data), not from wpa_s->wpa state, since wpa_sm_*
+	 * fields are not populated/updated for external auth. This guarantees
+	 * the element's Reduced/Extended RSN Capabilities fields match exactly
+	 * what is placed in the RSNE/RSNXE actually sent in this EPPKE Auth1
+	 * frame (IEEE P802.11bn/D2.0, 9.4.2.369).
+	 */
+	sp_len = security_profile_build(awork->rsn_capab, awork->rsnxe_data,
+					awork->rsnxe_data ?
+					2 + awork->rsnxe_data[1] : 0,
+					profile->number,
+					sp_buf, sizeof(sp_buf));
+	if (sp_len > 0 && pasn_set_security_profile(pasn, sp_buf, sp_len) == 0)
+		wpa_printf(MSG_DEBUG,
+			   "EPPKE: Including Security Profile element in external auth EPPKE Auth1 frame (profile=%d)",
+			   profile->number);
 }
 #endif /* CONFIG_ENC_ASSOC */
 
@@ -937,21 +1047,30 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 				   "EPPKE: No network profile found");
 			goto fail;
 		}
-		if (!ieee802_11_rsnx_capab(rsnxe, WLAN_RSNX_CAPAB_KEK_IN_PASN))
-		{
+		/*
+		 * Security Profile element preference (IEEE P802.11bn/D2.0,
+		 * 37.33):
+		 * check both the AP RSNXE and the (unmasked) Extended
+		 * RSN Capabilities embedded in the Security Profile element --
+		 * the AP might mask capabilities from the RSNXE, but not from
+		 * the Security Profile element's copy.
+		 */
+		if (!wpas_eppke_ap_rsnx_capab(wpa_s, bss,
+					     WLAN_RSNX_CAPAB_KEK_IN_PASN)) {
 			wpa_printf(MSG_INFO,
 				   "EPPKE: KEK_IN_PASN not set in AP RSNXE");
 			goto fail;
 		}
-		if (!ieee802_11_rsnx_capab(rsnxe,
-					   WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
+		if (!wpas_eppke_ap_rsnx_capab(
+			    wpa_s, bss,
+			    WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
 			wpa_printf(MSG_INFO,
 				   "EPPKE: ASSOC_FRAME_ENCRYPTION not set in AP RSNXE");
 			goto fail;
 		}
 		if (awork->akmp == WPA_KEY_MGMT_EPPKE &&
-		    !ieee802_11_rsnx_capab(rsnxe,
-					   WLAN_RSNX_CAPAB_UNAUTH_EPPKE)) {
+		    !wpas_eppke_ap_rsnx_capab(wpa_s, bss,
+					     WLAN_RSNX_CAPAB_UNAUTH_EPPKE)) {
 			wpa_printf(MSG_DEBUG,
 				   "EPPKE: AP does not support unauthenticated EPPKE");
 			goto fail;
@@ -985,6 +1104,9 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 				capab |= BIT(
 					WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
 #endif /* CONFIG_PMKSA_PRIVACY */
+
+			wpas_pasn_sec_prof_eppke(wpa_s, pasn, awork, bss);
+
 		}
 	}
 #endif /* CONFIG_ENC_ASSOC */

@@ -196,6 +196,7 @@ struct wpa_state_machine {
 
 	struct wpabuf *sae_pw_id;
 	unsigned int sae_pw_id_counter;
+	const struct security_profile_entry *security_profile;
 };
 
 

@@ -92,18 +92,6 @@ struct eap_over_auth_data {
 };
 
 #define EHT_ML_MAX_STA_PROF_LEN 1024
-struct mld_info {
-	bool mld_sta;
-
-	struct ml_common_info {
-		u8 mld_addr[ETH_ALEN];
-		u16 medium_sync_delay;
-		u16 eml_capa;
-		u16 mld_capa;
-	} common_info;
-
-	struct mld_link_info links[MAX_NUM_MLD_LINKS];
-};
 
 struct sta_info {
 	struct sta_info *next; /* next entry in sta list */
@@ -343,6 +331,7 @@ struct sta_info {
 
 #ifdef CONFIG_PASN
 	struct pasn_data *pasn;
+	bool sec_prof_used;
 #endif /* CONFIG_PASN */
 
 #ifdef CONFIG_IEEE80211BE

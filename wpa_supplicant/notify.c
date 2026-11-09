@@ -2128,7 +2128,6 @@ void wpas_notify_pr_ranging_complete(struct wpa_supplicant *wpa_s, u64 cookie)
 {
 	wpa_msg_global(wpa_s, MSG_INFO, PR_EVENT_RANGING_COMPLETE
 		       "cookie=%llu", (unsigned long long) cookie);
-	wpas_aidl_notify_rtt_continuous_ranging_terminated(wpa_s, (u32)-1 /*UNKNOWN*/);
 }
 
 
@@ -2158,6 +2157,7 @@ void wpas_notify_pr_ranging_terminated(struct wpa_supplicant *wpa_s, int reason)
 {
 	wpa_msg_global(wpa_s, MSG_INFO, PR_RANGING_TERMINATED "reason=%d",
 		       reason);
+	wpas_aidl_notify_rtt_continuous_ranging_terminated(wpa_s, reason);
 }
 
 #endif /* CONFIG_PR */

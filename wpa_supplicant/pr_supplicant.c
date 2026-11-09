@@ -27,7 +27,7 @@ static void wpas_pr_pasn_auth_work_done(struct wpa_supplicant *wpa_s);
 static void wpas_pr_pasn_auth_retry_timeout(void *eloop_ctx, void *timeout_ctx);
 
 /* Total listen window (ms) for the PASN responder ROC */
-#define PR_PASN_RESPONDER_ROC_DURATION 5000
+#define PR_PASN_RESPONDER_ROC_DURATION 10000
 /* Initiator PASN authentication timeout (s) */
 #define PR_PASN_AUTH_TIMEOUT           10
 /* Retry interval (ms) for unacked PASN Authentication frame 1 */
@@ -678,6 +678,8 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	pr.pd_preamble_bitmap = capa->pd_preambles;
 	pr.max_rx_antenna = capa->max_rx_antenna;
 	pr.max_tx_antenna = capa->max_tx_antenna;
+	pr.support_6ghz = capa->support_6ghz &&
+		wpas_is_6ghz_supported(wpa_s, true);
 
 	wpas_pr_setup_edca_channels(wpa_s, &pr.edca_channels,
 				    capa->pd_bandwidths,
@@ -707,8 +709,6 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	pr.pr_max_peer_rsta_role = capa->rsta.max_peers;
 	pr.max_ftms_per_burst = capa->max_ftms_per_burst;
 
-	pr.support_6ghz = capa->support_6ghz;
-
 	pr.pasn_send_mgmt = wpas_pr_pasn_send_mgmt;
 	pr.negotiation_started = wpas_pr_pasn_negotiation_started;
 	pr.pasn_result = wpas_pr_pasn_result;
@@ -723,7 +723,10 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 				   capa->pd_bandwidths, capa->pd_preambles,
 				   pr.support_6ghz);
 
-	if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
+	if (wpa_s->device_country[0] && wpa_s->device_country[1]) {
+		os_memcpy(pr.country, wpa_s->device_country, 2);
+		pr.country[2] = 0x04;
+	} else if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
 		os_memcpy(pr.country, wpa_s->conf->country, 2);
 		pr.country[2] = 0x04;
 	} else {
@@ -767,6 +770,46 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	global->pr_init_wpa_s = wpa_s;
 
 	return 0;
+}
+
+
+void wpas_pr_update_channel_list(struct wpa_supplicant *wpa_s)
+{
+	struct pr_data *pr;
+
+	if (!wpa_s->global || !wpa_s->global->pr)
+		return;
+
+	pr = wpa_s->global->pr;
+	if (!pr->cfg)
+		return;
+
+	wpa_s->is_6ghz_enabled = wpas_is_6ghz_supported(wpa_s, true);
+	pr->cfg->support_6ghz = wpa_s->support_6ghz && wpa_s->is_6ghz_enabled;
+
+	if (wpa_s->device_country[0] && wpa_s->device_country[1]) {
+		os_memcpy(pr->cfg->country, wpa_s->device_country, 2);
+		pr->cfg->country[2] = 0x04;
+	} else if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
+		os_memcpy(pr->cfg->country, wpa_s->conf->country, 2);
+		pr->cfg->country[2] = 0x04;
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "PR: Update channel list (support_6ghz=%d, country=%.2s)",
+		   pr->cfg->support_6ghz, pr->cfg->country);
+
+	os_memset(&pr->cfg->edca_channels, 0, sizeof(pr->cfg->edca_channels));
+	wpas_pr_setup_edca_channels(wpa_s, &pr->cfg->edca_channels,
+				    pr->cfg->pd_format_bw_bitmap,
+				    pr->cfg->pd_preamble_bitmap,
+				    pr->cfg->support_6ghz);
+
+	os_memset(&pr->cfg->ntb_channels, 0, sizeof(pr->cfg->ntb_channels));
+	wpas_pr_setup_ntb_channels(wpa_s, &pr->cfg->ntb_channels,
+				   pr->cfg->pd_format_bw_bitmap,
+				   pr->cfg->pd_preamble_bitmap,
+				   pr->cfg->support_6ghz);
 }
 
 
@@ -1140,6 +1183,8 @@ static void wpas_pr_pasn_roc_start_cb(struct wpa_radio_work *work, int deinit)
 			   "PR PASN: Failed to start ROC for responder");
 		wpas_pr_pasn_roc_work_done(wpa_s);
 		wpas_pr_pasn_abort_responder(wpa_s);
+		wpas_notify_pr_ranging_terminated(wpa_s,
+						  PR_SESSION_END_NEG_FAILED);
 		return;
 	}
 
@@ -1162,6 +1207,11 @@ static void wpas_pr_schedule_responder_roc(struct wpa_supplicant *wpa_s,
 		goto fail;
 	}
 	rwork->freq = freq;
+
+	if (wpa_s->pr_responder_mode &&
+	    !is_zero_ether_addr(wpa_s->pr_responder_src_addr))
+		os_memcpy(rwork->src_addr, wpa_s->pr_responder_src_addr,
+			  ETH_ALEN);
 
 	if (!radio_add_work(wpa_s, freq, "pr-pasn-roc", 0,
 			    wpas_pr_pasn_roc_start_cb, rwork)) {
@@ -1238,8 +1288,12 @@ static void wpas_pr_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	const u8 *peer_addr = NULL;
 
 	if (deinit) {
-		if (!work->started)
+		if (work->started) {
 			eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
+			eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout,
+					     wpa_s, NULL);
+			wpa_s->pr_pasn_auth_work = NULL;
+		}
 
 		wpas_pr_pasn_free_auth_work(awork);
 		work->ctx = NULL;

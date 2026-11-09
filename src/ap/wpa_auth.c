@@ -12,6 +12,7 @@
 #include "utils/eloop.h"
 #include "utils/state_machine.h"
 #include "utils/bitfield.h"
+#include "common/ieee802_11_common.h"
 #include "common/ieee802_11_defs.h"
 #include "common/ocv.h"
 #include "common/dpp.h"
@@ -27,9 +28,7 @@
 #include "crypto/random.h"
 #include "eapol_auth/eapol_auth_sm.h"
 #include "drivers/driver.h"
-#include "ap_config.h"
-#include "ieee802_11.h"
-#include "sta_info.h"
+#include "mld.h"
 #include "wpa_auth.h"
 #include "pmksa_cache_auth.h"
 #include "wpa_auth_i.h"
@@ -5239,6 +5238,9 @@ SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 		kde_len += wpabuf_len(conf->eapol_m3_elements);
 #endif /* CONFIG_TESTING_OPTIONS */
 
+	if (sm->security_profile)
+		kde_len += conf->security_profile_len;
+
 	kde = os_malloc(kde_len);
 	if (!kde)
 		goto done;
@@ -5391,6 +5393,16 @@ SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 	if (conf->eapol_m3_no_encrypt)
 		encr = 0;
 #endif /* CONFIG_TESTING_OPTIONS */
+
+	/*
+	 * Add own Security Profile element to message 3 if STA used a security
+	 * profile for the association.
+	 */
+	if (sm->security_profile) {
+		os_memcpy(pos, conf->security_profile,
+			  conf->security_profile_len);
+		pos += conf->security_profile_len;
+	}
 
 	wpa_send_eapol(sm->wpa_auth, sm,
 		       (secure ? WPA_KEY_INFO_SECURE : 0) |
@@ -6707,6 +6719,15 @@ int wpa_get_mib_sta(struct wpa_state_machine *sm, char *buf, size_t buflen)
 		return len;
 	len += ret;
 
+	if (sm->security_profile) {
+		ret = os_snprintf(buf + len, buflen - len,
+				  "security_profile=%u\n",
+				  sm->security_profile->number);
+		if (os_snprintf_error(buflen - len, ret))
+			return len;
+		len += ret;
+	}
+
 	return len;
 }
 
@@ -7582,6 +7603,14 @@ void wpa_auth_set_ssid_protection(struct wpa_state_machine *sm, bool val)
 {
 	if (sm)
 		sm->ssid_protection = val;
+}
+
+
+void wpa_auth_set_security_profile(struct wpa_state_machine *sm,
+				   const struct security_profile_entry *val)
+{
+	if (sm)
+		sm->security_profile = val;
 }
 
 
